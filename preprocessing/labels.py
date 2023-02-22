@@ -58,7 +58,7 @@ def excel_to_dict(df: pd.DataFrame) -> Dict[str, Dict[str, str]]:
             for col in COLS:
                 
                 if (vertebra == "L4" or vertebra == "L3") and (col == "GRAD_VISUELL" or col == "_EJ_BEDÖMBAR"):
-                    continue
+                    d[row["ID"]][vertebra][col] = None
                 else:
                     d[row["ID"]][vertebra][col] = getattr(row, vertebra + col)
 
@@ -90,7 +90,7 @@ def excel_to_records(df: pd.DataFrame, only_auditable=False) -> List[Dict[str, s
             for col in COLS:
                 
                 if (vertebra == "L4" or vertebra == "L3") and (col == "GRAD_VISUELL" or col == "_EJ_BEDÖMBAR"):
-                    continue
+                    record[vertebra][col] = None
                 else:
                     record[vertebra][col] = getattr(row, vertebra + col)
 

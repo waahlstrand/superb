@@ -35,6 +35,18 @@ class Vertebra:
 
     def __repr__(self) -> str:
         return str(self)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "number": self.number,
+            "deformity": self.deformity,
+            "severity": self.severity,
+            "user_set_deformity": self.user_set_deformity,
+            "analysis_type": self.analysis_type,
+            "x": self.x.tolist(),
+            "y": self.y.tolist(),
+        }
 
 class VFA:
 
@@ -100,8 +112,11 @@ class Patient:
 
         self.root = root
         self.id = id
-        self.vfa = VFA(root / "dicom" / "vfa") if (root / "dicom" / "vfa").exists() and vfa else None
-        self.reports = Reports(root / "dicom" / "reports") if (root / "dicom" / "reports").exists and reports else None
+
+        vfa_root = root / self.id / "dicom" / "vfa"
+
+        self.vfa = VFA(vfa_root) if vfa_root.exists() and vfa else None
+        self.reports = Reports(root / self.id / "dicom" / "reports") if (root / self.id / "dicom" / "reports").exists and reports else None
 
     @property
     def image(self) -> np.ndarray:
@@ -138,7 +153,7 @@ class PatientCollection(dict):
         
         self.root = root
 
-        files = list(root.glob("*/"))
+        files = root.glob("*/")
 
         self.update({
             file.name: Patient(file.name, file, vfa, reports) for file in files

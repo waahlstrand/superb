@@ -14,10 +14,13 @@ PADDING_SHAPE = (700, 1800)
 
 normalize = lambda x: x / NORMALIZATION
 
-def normalized_patient_image(p: Patient) -> np.ndarray:
+def normalized_patient_image(p: Patient, window=False) -> np.ndarray:
 
     # Perform contrast sharpening from DICOM window
-    windowed = pydicom.pixel_data_handlers.apply_windowing(p.image, p.vfa.d)
+    if window:
+        windowed = pydicom.pixel_data_handlers.apply_windowing(p.image, p.vfa.d)
+    else:
+        windowed = p.image
 
     # Max-normalization to float
     image = normalize(windowed)
