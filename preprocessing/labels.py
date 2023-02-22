@@ -71,7 +71,7 @@ def excel_to_records(df: pd.DataFrame, only_auditable=False) -> List[Dict[str, s
     """
     Converts a pandas dataframe to a list of dictionaries.
     """
-    df = df.iloc[1:]
+    # df = df.iloc[1:]
     if only_auditable:
         df = df[~df["EJ_BEDÖMBAR"].notna()]
 
