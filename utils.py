@@ -193,6 +193,7 @@ def build_patient_directory_tree(dcm_root: Path, labels_path: Path, target_root:
                 Image.fromarray(d.pixel_array).save(new_image_file)
 
                 ## Handle the label information sources
+                dx, dy     = d.PixelSpacing
                 annotation = patient_annotation(d)
                 label      = labelling.excel_to_records(labels[labels["ID"] == patient_id])
 
@@ -200,7 +201,15 @@ def build_patient_directory_tree(dcm_root: Path, labels_path: Path, target_root:
                 if len(label) == 1:
                     
                     label = label[0]
-                    label.update(annotation)
+                    for vertebra in labelling.VERTEBRA_NAMES:
+                        if vertebra in label and vertebra in annotation:
+                            label[vertebra].update(annotation[vertebra])
+                        elif vertebra not in label and vertebra in annotation:
+                            label[vertebra] = annotation[vertebra]
+                        else:
+                            label[vertebra] = {}
+
+                    label.update({"pixel_spacing": [dx, dy]})
 
                     with open(new_label_file, "w") as f:
                         json.dump(label, f, indent=4)
