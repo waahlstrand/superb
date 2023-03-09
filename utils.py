@@ -138,6 +138,7 @@ def build_patient_directory_tree(dcm_root: Path, labels_path: Path, target_root:
 
     # Group files by patient
     groups: Dict[str, List[Path]] = {} # Patient ID -> List of files
+    lacks_vfa = []
 
     for file in tqdm(files, desc="Grouping files by patient"):
         ds = pydicom.dcmread(file)
@@ -149,6 +150,7 @@ def build_patient_directory_tree(dcm_root: Path, labels_path: Path, target_root:
 
     progress = tqdm(groups.items(), desc="Building directory tree")
     for image_patient_id, group in progress:
+        has_vfa = False
 
         progress.set_description(f"Building directory tree for {image_patient_id}")
 
@@ -175,6 +177,7 @@ def build_patient_directory_tree(dcm_root: Path, labels_path: Path, target_root:
             #  - Get the label for the image
             #  - Save all the files
             if is_vfa_dicom(d):
+                has_vfa = True
 
                 # Create a renamed dicom file
                 new_dcm_file    = lateral_file_dir / (patient_id + ".dcm")
@@ -227,3 +230,9 @@ def build_patient_directory_tree(dcm_root: Path, labels_path: Path, target_root:
 
             # Release memory of dicom file
             del d
+        
+        if not has_vfa:
+            print(f"Could not find VFA dicom file for patient {image_patient_id}")
+            lacks_vfa.append(image_patient_id)
+
+    return lacks_vfa

@@ -9,25 +9,73 @@ import preprocessing.labels as labelling
 import preprocessing.images as imaging
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from torchvision import transforms
+import torchvision
 import json
 import cv2
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import utils
+import torch.nn as nn
 #%%
 
-has_compression = lambda x: x["GRAD_MORF"] != 0 or x["GRAD_VISUELL"] != 0 or x["TYP"] != 0
+class Patchify(nn.Module):
 
+    def __init__(self, resize_shape: Tuple[int, int] , patch_size: int = 256):
+        super().__init__()
+        self.resize_shape = resize_shape
+        self.patch_size = patch_size
+        self.resize = torchvision.transforms.Resize(self.resize_shape)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+        x = self.resize(x)
+
+        return self.patchify(x, self.patch_size)
+    
+    def patchify(self, image: torch.Tensor, patch_size: int) -> torch.Tensor:
+
+        image   = image.unfold(1, *patch_size).unfold(2, *patch_size).reshape(-1, *patch_size)
+        return image
+
+class Normalize(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.normalize(x)
+    
+    def normalize(self, image: torch.Tensor) -> torch.Tensor:
+        
+        return imaging.normalize(image)
+    
+
+has_compression = lambda x: \
+    int(x.get("GRAD_MORF", 0) or 0) > 0 or \
+    int(x.get("GRAD_VISUELL",0) or 0) > 0 or \
+    int(x.get("TYP", 0) or 0) > 0
+
+lacks_grad_visuell_or_grad_typ = lambda x: (x.get("GRAD_VISUELL") or x.get("TYP")) and not (x.get("GRAD_VISUELL") and x.get("TYP"))
 class SuperbDataset(Dataset):
     
-    def __init__(self, patients_root: Path, label_type: str = "binary") -> None:
+    def __init__(self, patients_root: Path, label_type: str = "binary", transforms: List[nn.Module] = []) -> None:
         super().__init__()
 
         self.patients_root = patients_root
-        self.patient_dirs = [patient_dir for patient_dir in patients_root.glob("*") if patient_dir.is_dir()]
+        self.patient_dirs = [patient_dir for patient_dir in patients_root.glob("*") if patient_dir.is_dir() and (patient_dir.name not in REMOVED)]
         self.label_type = label_type
+        self.binary_class_distribution = {0: 2493, 1: 429}
+
+        self.transform_list = [
+            Normalize(),
+            torchvision.transforms.ToTensor(),
+        ]
+        self.transform_list.extend(transforms)
+        self.transforms = torchvision.transforms.Compose(self.transform_list)
+
+
         # First index: GRAD_VISUELL
         # 1: mild compression
         # 2: moderate compression
@@ -37,19 +85,20 @@ class SuperbDataset(Dataset):
         # 2: concave
         # 3: crush
         self.fracture_map = {
-            (None, None): -1, # no compression
-            (0, None): -1, # no compression
-            (None, 0): -1, # no compression
-            (0,0): -1, # no compression
-            (1,1): 0, # mild wedge
-            (1,2): 1, # mild concave
-            (1,3): 2, # mild crush
-            (2,1): 3, # moderate wedge
-            (2,2): 4, # moderate concave
-            (2,3): 5, # moderate crush
-            (3,1): 6, # severe wedge
-            (3,2): 7, # severe concave
-            (3,3): 8, # severe crush
+            (None, None): 0, # no compression
+            (0, None): 0, # no compression
+            (None, 0): 0, # no compression
+            (0,0): 0, # no compression
+            (1,1): 1, # mild wedge
+            (1,2): 2, # mild concave
+            (1,3): 3, # mild crush
+            (2,1): 4, # moderate wedge
+            (2,2): 5, # moderate concave
+            (2,3): 6, # moderate crush
+            (3,1): 7, # severe wedge
+            (3,2): 8, # severe concave
+            (3,3): 9, # severe crush
+            # (0,2): 1,
 
         }
 
@@ -59,41 +108,51 @@ class SuperbDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
 
-        image, label = self._read_patient_dir(self.patient_dirs[idx])
+        image, label, weight = self._read_patient_dir(self.patient_dirs[idx])
 
-        return image, label
+        return image, label, weight
+    
+    def get_idx(self, id: str, label_override=True) -> int:
+        
+        image, label, weight = self._read_patient_dir(self.patient_dirs[id], label_override=label_override)
+
+        return image, label, weight
     
     def get_patient(self, id: str) -> Tuple[torch.Tensor, torch.Tensor]:
             
-        image, label = self._read_patient_dir(self.patients_root / id)
+        image, label, weight = self._read_patient_dir(self.patients_root / id)
         
-        return image, label
+        return image, label, weight
     
     def _read_patient_dir(self, patient_dir: Path, label_override: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
          
         patient_id = patient_dir.name
         image_path = patient_dir / "lateral" / (patient_id + ".tiff")
         label_path = patient_dir / "lateral" / (patient_id + ".json")
-
         image   = cv2.imread(str(image_path), -1)
+        weight  = 1
+
         with open(label_path, "r") as f:
             label = json.load(f)
 
-        if self.label_type == "binary":
-            encoded = self._binary_label(label)
-        elif self.label_type == "categorical":
-            encoded = self._categorical_label(label)
-        else:
-            encoded = label
-
         if label_override:
             encoded = label
+        else:
+            if self.label_type == "binary":
+                encoded = self._binary_label(label)
+                weight  = len(self) / self.binary_class_distribution[int(encoded)]
+            elif self.label_type == "categorical":
+                encoded = self._categorical_label(label)
+            else:
+                encoded = label
+
+
         
-        return image, encoded
+        return image, encoded, weight
     
     def visualize_item(self, idx, **kwargs) -> Tuple[plt.Figure, plt.Axes]:
             
-        image, label = self._read_patient_dir(self.patient_dirs[idx], label_override=True)
+        image, label, weight = self._read_patient_dir(self.patient_dirs[idx], label_override=True)
         
         f, ax = self.plot(image, label, **kwargs)
 
@@ -101,7 +160,7 @@ class SuperbDataset(Dataset):
     
     def visualize_patient(self, id, **kwargs) -> Tuple[plt.Figure, plt.Axes]:
             
-        image, label = self._read_patient_dir(self.patients_root / id, label_override=True)
+        image, label, weight = self._read_patient_dir(self.patients_root / id, label_override=True)
         
         f, ax = self.plot(image, label, **kwargs)
 
@@ -113,26 +172,8 @@ class SuperbDataset(Dataset):
         fig = plt.figure(figsize=(scale*w, scale*h))
         ax = fig.add_subplot(111)
 
-        ax.imshow(np.flip(image, 0), cmap='gray', origin='lower')
-
-        for i, vertebra in enumerate(labelling.VERTEBRA_NAMES):
-
-            if vertebra in label:
-                if "x" in label[vertebra] and "y" in label[vertebra]:
-
-                    c = "r" if i % 2 else "m"
-
-                    x = np.array(label[vertebra]["x"])
-                    y = np.array(label[vertebra]["y"])
-
-                    ax.scatter(x/label["pixel_spacing"][0], 
-                            y/label["pixel_spacing"][1], 
-                            marker='x', c=c)
-                    ax.text(x[0]/label["pixel_spacing"][0]+offset[0], 
-                            y[0]/label["pixel_spacing"][1]+offset[1], 
-                            vertebra + " " +  "(" + str(self.fracture_map[(label[vertebra].get("GRAD_VISUELL", 0), label[vertebra].get("TYP", 0))])+")",
-                            c=c)
-
+        ax.imshow(image, cmap='gray', origin='lower')
+        ax.set_title(label["id"])
         return fig, ax
     
     def _binary_label(self, label: Dict[str, Any]) -> torch.Tensor:
@@ -141,7 +182,12 @@ class SuperbDataset(Dataset):
     
     def _categorical_label(self, label: Dict[str, Any]) -> torch.Tensor:
          
-        return torch.tensor([
-            self.fracture_map[(label[vertebra].get("GRAD_VISUELL", 0), label[vertebra].get("TYP", 0))] 
-            for vertebra in labelling.VERTEBRA_NAMES
-            ])
+        vertebra_list = []
+        for vertebra in labelling.VERTEBRA_NAMES:
+            visual = label[vertebra].get("GRAD_VISUELL") if label[vertebra].get("GRAD_VISUELL") else 0
+            type   = label[vertebra].get("TYP") if label[vertebra].get("TYP") else 0
+            target  = 1 if self.fracture_map[(visual, type)] > 0 else 0
+
+            vertebra_list.append(target)
+
+        return torch.tensor(vertebra_list)

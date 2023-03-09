@@ -89,7 +89,7 @@ def excel_to_records(df: pd.DataFrame, only_auditable=False) -> List[Dict[str, s
             
             for col in COLS:
                 
-                if (vertebra == "L4" or vertebra == "L3") and (col == "GRAD_VISUELL" or col == "_EJ_BEDÖMBAR"):
+                if col == "_EJ_BEDÖMBAR":
                     record[vertebra][col] = None
                 else:
                     record[vertebra][col] = getattr(row, vertebra + col)

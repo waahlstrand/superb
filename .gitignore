@@ -3,6 +3,7 @@ __pycache__/
 data/
 imgs/
 old/
+logs/
 
 # Extensions
 *.pyc
@@ -11,3 +12,9 @@ old/
 *.pkl
 *.bin
 *.csv
+*.json
+*.ckpt
+*.yml
+
+# Files
+test.py

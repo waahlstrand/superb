@@ -10,7 +10,7 @@ MAX_HEIGHT = 1656
 
 NORMALIZATION = 4500 # Approximate maximum pixel value of all images
 SHAPE = (512, 1024)
-PADDING_SHAPE = (700, 1800)
+PADDING_SHAPE = (1800, 600)
 
 normalize = lambda x: x / NORMALIZATION
 
