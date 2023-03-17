@@ -4,6 +4,8 @@ data/
 imgs/
 old/
 logs/
+configs/
+models/
 
 # Extensions
 *.pyc
