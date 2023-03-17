@@ -26,3 +26,15 @@ def normalized_patient_image(p: Patient, window=False) -> np.ndarray:
     image = normalize(windowed)
 
     return image
+
+def heuristic_height(vertebra: int, n_vertebrae: int):
+    """
+    Heuristic for approximately locating the height of the vertebrae.
+    """
+    normalized_vertebra = vertebra / n_vertebrae
+
+    centres = np.linspace(
+        start=1/(n_vertebrae+1), 
+        stop=n_vertebrae/(n_vertebrae+1), 
+        num=n_vertebrae)
+    
