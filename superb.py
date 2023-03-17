@@ -60,13 +60,20 @@ has_compression = lambda x: \
 lacks_grad_visuell_or_grad_typ = lambda x: (x.get("GRAD_VISUELL") or x.get("TYP")) and not (x.get("GRAD_VISUELL") and x.get("TYP"))
 class SuperbDataset(Dataset):
     
-    def __init__(self, patients_root: Path, label_type: str = "binary", transforms: List[nn.Module] = []) -> None:
+    def __init__(self, 
+                 patients_root: Path, 
+                 label_type: str = "binary", 
+                 transforms: List[nn.Module] = [], 
+                 removed: List[str] = [], 
+                 class_distribution: Dict[int, int] = {}) -> None:
+        
         super().__init__()
 
+        self.removed = removed
         self.patients_root = patients_root
-        self.patient_dirs = [patient_dir for patient_dir in patients_root.glob("*") if patient_dir.is_dir() and (patient_dir.name not in REMOVED)]
+        self.patient_dirs = [patient_dir for patient_dir in patients_root.glob("*") if patient_dir.is_dir() and (patient_dir.name not in self.removed)]
         self.label_type = label_type
-        self.binary_class_distribution = {0: 2493, 1: 429}
+        self.class_distribution = class_distribution
 
         self.transform_list = [
             Normalize(),
@@ -132,6 +139,9 @@ class SuperbDataset(Dataset):
         image   = cv2.imread(str(image_path), -1)
         weight  = 1
 
+        if self.transforms:
+            image = self.transforms(image)
+
         with open(label_path, "r") as f:
             label = json.load(f)
 
@@ -140,8 +150,8 @@ class SuperbDataset(Dataset):
         else:
             if self.label_type == "binary":
                 encoded = self._binary_label(label)
-                weight  = len(self) / self.binary_class_distribution[int(encoded)]
-            elif self.label_type == "categorical":
+                weight  = len(self) / self.class_distribution.get(int(encoded), len(self))
+            elif self.label_type == "multilabel":
                 encoded = self._categorical_label(label)
             else:
                 encoded = label
@@ -186,7 +196,7 @@ class SuperbDataset(Dataset):
         for vertebra in labelling.VERTEBRA_NAMES:
             visual = label[vertebra].get("GRAD_VISUELL") if label[vertebra].get("GRAD_VISUELL") else 0
             type   = label[vertebra].get("TYP") if label[vertebra].get("TYP") else 0
-            target  = 1 if self.fracture_map[(visual, type)] > 0 else 0
+            target  = 1.0 if self.fracture_map[(visual, type)] > 0 else 0.0
 
             vertebra_list.append(target)
 
