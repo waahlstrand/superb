@@ -1,52 +1,109 @@
 import torch
 from torch.nn import functional as F
 import torch.nn as nn
-from torchvision.models import resnet18, resnet34, efficientnet_v2_l
+from torchvision.models import resnet18, resnet34, efficientnet_b7
 import pytorch_lightning as pl
 from preprocessing.images import PADDING_SHAPE
 import warnings
 import torchmetrics
 from typing import *
 from sklearn.utils import class_weight
+from augmentations import Augmenter
 warnings.filterwarnings("ignore")
+
+class ConvBlock(nn.Module):
+
+    def __init__(self, in_channels, out_channels, kernel_size, activation = nn.ELU()):
+
+        super().__init__()
+
+        self.conv1 = nn.Conv2d(in_channels = in_channels, out_channels = out_channels, kernel_size = kernel_size, stride = 1, padding = 0)
+        self.activation = activation
+        self.pooling = nn.AvgPool2d((2, 2))
+
+    def forward(self, x):
+
+        x = self.conv1(x)
+        x = self.activation(x)
+        x = self.pooling(x)
+
+        return x
+
+class CustomSuperbBackbone(nn.Module):
+
+    def __init__(self, n_classes: int = 1):
+
+        self.n_classes = n_classes
+
+        super().__init__()
+
+        self.model = nn.Sequential(
+            ConvBlock(3, 16, 3),
+            *[ConvBlock(16*(2**i), 16*(2**(i+1)), 3) for i in range(7)],
+            nn.Flatten(),
+            nn.Linear(8192, 2048),
+            nn.ELU(),
+            nn.Linear(2048, 1024),
+            nn.ELU(),
+            nn.Linear(1024, self.n_classes),
+        )
+
+    def forward(self, x):
+            
+            return self.model(x)
+
 
 class SuperbModel(pl.LightningModule):
 
-    def __init__(self, n_channels: int, 
+    def __init__(self, backbone: str,
+                       augmenter: Augmenter,
+                       n_channels: int, 
                        n_classes: int, 
-                       lr: float = 1e-3,
-                       height: int = PADDING_SHAPE[0],
-                       width: int = PADDING_SHAPE[1], ):
+                       lr: float = 1e-4,
+                       weight: Optional[torch.Tensor] = None):
 
-        self.height = height # 700
-        self.width = width # 1800
+        self.backbone = backbone
         self.n_channels = n_channels
         self.n_classes = n_classes
         self.lr = lr
-        self.kernel = (2, 3)
+        self.kernel = (2, 2)
+        self.weight = weight
 
         self.save_hyperparameters()
 
         super().__init__()
 
-        self.metrics = nn.ModuleList(self.set_metrics("binary", n_classes) if n_classes == 1 else self.set_metrics("multiclass", n_classes))
-        self.loss = nn.BCEWithLogitsLoss()
-        self.pre_conv = nn.Conv2d(in_channels=n_channels, out_channels=3, kernel_size=self.kernel, stride=1, padding=0)
-        self.resnet = resnet34(pretrained=False)
-        self.model = nn.Sequential(
-            nn.ReLU(),
-            nn.Linear(1000, n_classes),
-            nn.Sigmoid()
-        )
+        self.task           = "binary" if n_classes == 1 else "multilabel"
+        self.metrics        = nn.ModuleList(self.get_metrics(self.task, n_classes))
+        self.loss           = nn.BCEWithLogitsLoss(pos_weight=(weight[0]//weight[1]).float(), reduction="mean")
+        self.augmenter      = augmenter
+        self.pre_conv       = nn.Sequential(nn.Conv2d(in_channels=n_channels, out_channels=3, kernel_size=self.kernel, stride=1, padding=0), nn.ELU())
+        self.model          = self.get_model(backbone, n_classes)
+        
+    def get_model(self, backbone: str, n_classes: int):
 
-    def set_metrics(self, task, n_classes: int) -> List[torchmetrics.Metric]:
+        if backbone == "custom":
+            model = CustomSuperbBackbone()
+        elif backbone == "efficientnet-b7":
+            model = efficientnet_b7(pretrained=False)
+            model.classifier[1] = nn.Linear(2560, n_classes)
+        elif backbone == "resnet34":
+            model = resnet34(pretrained=False)
+            n_features = model.fc.in_features
+            model.fc = nn.Linear(n_features, n_classes)
+        else:
+            raise ValueError("Backbone not implemented.")
+        
+        return model
+
+    def get_metrics(self, task, n_classes: int) -> List[torchmetrics.Metric]:
 
         metrics = [
                 torchmetrics.Accuracy(task=task, num_classes=n_classes),
                 torchmetrics.Precision(task=task, num_classes=n_classes, average="macro"),
                 torchmetrics.Specificity(task=task, num_classes=n_classes, average="macro"),
-                # torchmetrics.Recall(task=task, num_classes=n_classes, average="macro"),
-                # torchmetrics.F1Score(task=task, num_classes=n_classes, average="macro"),
+                torchmetrics.Recall(task=task, num_classes=n_classes, average="macro"),
+                torchmetrics.F1Score(task=task, num_classes=n_classes, average="macro"),
                 # torchmetrics.PrecisionRecallCurve(task=task, num_classes=n_classes),
                 # torchmetrics.AUROC(task=task, num_classes=n_classes),
                 # torchmetrics.ROC(task=task, num_classes=n_classes),
@@ -59,58 +116,55 @@ class SuperbModel(pl.LightningModule):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         
-        x = x.float()
         x = self.pre_conv(x)
-        x = F.relu(x)
-        x = self.resnet(x)
         x = self.model(x)
         x = x.view(-1, self.n_classes)
 
         return x
 
-    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        x, y, weight = batch
+    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
 
-        x = x.float()
-        y = y.float()
-        weight = weight.float()
+        x, y = batch
+        x, y = x.unsqueeze(1), y.unsqueeze(1)
+        
+        x = self.augmenter(x)
 
         y_hat = self(x)
-
-        y = y.squeeze()
-        y_hat = y_hat.squeeze()
-        loss = self.loss(y_hat, y, reduction="mean")
-
-        for metric in self.metrics:
-            self.log("train__"+metric.__class__.__name__, metric(y_hat, y), on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        loss = self.loss(y_hat, y.float())
 
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        return loss
+
+        return {"loss": loss, "y_hat": y_hat, "y": y}
     
-    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor], batch_idx: int):
+    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
 
-        x, y, weight = batch
+        x, y = batch
+        x, y = x.unsqueeze(1), y.unsqueeze(1)
 
-        x = x.float()
-        y = y.float()
-        weight = weight.float()
-
+        x = self.augmenter.normalize(x)
+        
         y_hat = self(x)
 
-        y = y.squeeze()
-        y_hat = y_hat.squeeze()
-        loss = self.loss(y_hat, y, reduction="mean")
+        loss = self.loss(y_hat, y.float())
+        
+        self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True)
+
+        return {"loss": loss, "y_hat": y_hat, "y": y}
+    
+    def training_epoch_end(self, outputs: Dict[str, torch.Tensor]):
         
         for metric in self.metrics:
-            self.log("train__"+metric.__class__.__name__, metric(y_hat, y), on_step=False, on_epoch=True, prog_bar=True, logger=True)
+            self.log("train_"+metric.__class__.__name__, metric(outputs["y_hat"], outputs["y"].float()), prog_bar=True, logger=True)
 
-        self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        return loss
+    def validation_step_end(self, outputs: Dict[str, torch.Tensor]):
+        
+        for metric in self.metrics:
+            self.log("val_"+metric.__class__.__name__, metric(outputs["y_hat"], outputs["y"].float()), prog_bar=True, logger=True)
+
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
         return torch.optim.Adam(self.parameters(), lr=self.lr)
     
-
 
 class SimSiam(pl.LightningModule):
 

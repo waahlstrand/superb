@@ -1,5 +1,3 @@
-
-#%%
 import torch
 from pathlib import Path
 from torch.utils.data import Dataset
@@ -9,7 +7,7 @@ import preprocessing.labels as labelling
 import preprocessing.images as imaging
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-import torchvision
+from torchvision import transforms as T
 import json
 import cv2
 import matplotlib
@@ -17,53 +15,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 import utils
 import torch.nn as nn
-#%%
-
-class Patchify(nn.Module):
-
-    def __init__(self, resize_shape: Tuple[int, int] , patch_size: int = 256):
-        super().__init__()
-        self.resize_shape = resize_shape
-        self.patch_size = patch_size
-        self.resize = torchvision.transforms.Resize(self.resize_shape)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-
-        x = self.resize(x)
-
-        return self.patchify(x, self.patch_size)
-    
-    def patchify(self, image: torch.Tensor, patch_size: int) -> torch.Tensor:
-
-        image   = image.unfold(1, *patch_size).unfold(2, *patch_size).reshape(-1, *patch_size)
-        return image
-
-class Normalize(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.normalize(x)
-    
-    def normalize(self, image: torch.Tensor) -> torch.Tensor:
-        
-        return imaging.normalize(image)
-    
+from augmentations import Normalize
 
 has_compression = lambda x: \
     int(x.get("GRAD_MORF", 0) or 0) > 0 or \
     int(x.get("GRAD_VISUELL",0) or 0) > 0 or \
     int(x.get("TYP", 0) or 0) > 0
 
-lacks_grad_visuell_or_grad_typ = lambda x: (x.get("GRAD_VISUELL") or x.get("TYP")) and not (x.get("GRAD_VISUELL") and x.get("TYP"))
+
 class SuperbDataset(Dataset):
     
     def __init__(self, 
                  patients_root: Path, 
                  label_type: str = "binary", 
-                 transforms: List[nn.Module] = [], 
+                 target_size: Tuple[int, int] = imaging.PADDING_SHAPE,
                  removed: List[str] = [], 
                  class_distribution: Dict[int, int] = {}) -> None:
         
@@ -73,15 +38,8 @@ class SuperbDataset(Dataset):
         self.patients_root = patients_root
         self.patient_dirs = [patient_dir for patient_dir in patients_root.glob("*") if patient_dir.is_dir() and (patient_dir.name not in self.removed)]
         self.label_type = label_type
+        self.target_size = target_size
         self.class_distribution = class_distribution
-
-        self.transform_list = [
-            Normalize(),
-            torchvision.transforms.ToTensor(),
-        ]
-        self.transform_list.extend(transforms)
-        self.transforms = torchvision.transforms.Compose(self.transform_list)
-
 
         # First index: GRAD_VISUELL
         # 1: mild compression
@@ -115,21 +73,21 @@ class SuperbDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
 
-        image, label, weight = self._read_patient_dir(self.patient_dirs[idx])
+        image, label = self._read_patient_dir(self.patient_dirs[idx])
 
-        return image, label, weight
+        return image, label
     
-    def get_idx(self, id: str, label_override=True) -> int:
+    def get_idx(self, id: str, label_override=True) -> Tuple[torch.Tensor, torch.Tensor]:
         
-        image, label, weight = self._read_patient_dir(self.patient_dirs[id], label_override=label_override)
+        image, label = self._read_patient_dir(self.patient_dirs[id], label_override=label_override)
 
-        return image, label, weight
+        return image, label
     
     def get_patient(self, id: str) -> Tuple[torch.Tensor, torch.Tensor]:
             
-        image, label, weight = self._read_patient_dir(self.patients_root / id)
+        image, label = self._read_patient_dir(self.patients_root / id)
         
-        return image, label, weight
+        return image, label
     
     def _read_patient_dir(self, patient_dir: Path, label_override: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
          
@@ -137,10 +95,9 @@ class SuperbDataset(Dataset):
         image_path = patient_dir / "lateral" / (patient_id + ".tiff")
         label_path = patient_dir / "lateral" / (patient_id + ".json")
         image   = cv2.imread(str(image_path), -1)
-        weight  = 1
+        image   = (image // 256).astype(np.uint8)
+        image   = cv2.resize(image, self.target_size)
 
-        if self.transforms:
-            image = self.transforms(image)
 
         with open(label_path, "r") as f:
             label = json.load(f)
@@ -150,19 +107,16 @@ class SuperbDataset(Dataset):
         else:
             if self.label_type == "binary":
                 encoded = self._binary_label(label)
-                weight  = len(self) / self.class_distribution.get(int(encoded), len(self))
             elif self.label_type == "multilabel":
                 encoded = self._categorical_label(label)
             else:
                 encoded = label
 
-
-        
-        return image, encoded, weight
+        return image, encoded
     
     def visualize_item(self, idx, **kwargs) -> Tuple[plt.Figure, plt.Axes]:
             
-        image, label, weight = self._read_patient_dir(self.patient_dirs[idx], label_override=True)
+        image, label = self._read_patient_dir(self.patient_dirs[idx], label_override=True)
         
         f, ax = self.plot(image, label, **kwargs)
 
@@ -170,7 +124,7 @@ class SuperbDataset(Dataset):
     
     def visualize_patient(self, id, **kwargs) -> Tuple[plt.Figure, plt.Axes]:
             
-        image, label, weight = self._read_patient_dir(self.patients_root / id, label_override=True)
+        image, label = self._read_patient_dir(self.patients_root / id, label_override=True)
         
         f, ax = self.plot(image, label, **kwargs)
 
@@ -182,7 +136,7 @@ class SuperbDataset(Dataset):
         fig = plt.figure(figsize=(scale*w, scale*h))
         ax = fig.add_subplot(111)
 
-        ax.imshow(image, cmap='gray', origin='lower')
+        ax.imshow(image[0, :, :], cmap='gray', origin='lower')
         ax.set_title(label["id"])
         return fig, ax
     
