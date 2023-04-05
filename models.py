@@ -1,15 +1,32 @@
 import torch
 from torch.nn import functional as F
+from torchvision import transforms as T
 import torch.nn as nn
 from torchvision.models import resnet18, resnet34, efficientnet_b7
 import pytorch_lightning as pl
+from pytorch_lightning.loggers import TensorBoardLogger, CSVLogger
+import matplotlib.pyplot as plt
 from preprocessing.images import PADDING_SHAPE
 import warnings
 import torchmetrics
 from typing import *
-from sklearn.utils import class_weight
-from augmentations import Augmenter
+from augmentations import Augmenter, Preprocess
 warnings.filterwarnings("ignore")
+
+def plot_prediction_histogram(preds, labels, title):
+    fig, ax = plt.subplots(figsize=(10, 10))
+
+    preds_true = preds[labels == 1]
+    preds_false = preds[labels == 0]
+
+    ax.hist(preds_true, bins=50, label="predicted (true)", density=True, color="green", alpha=0.3)
+    ax.hist(preds_false, bins=50, label="predicted (false)", density=True, color="red", alpha=0.3)
+
+    ax.hist(labels, bins=2, label="labels", density=True, color="gray", alpha=0.8)
+    ax.set_title(title)
+    ax.legend()
+    
+    return fig
 
 class ConvBlock(nn.Module):
 
@@ -55,46 +72,30 @@ class CustomSuperbBackbone(nn.Module):
 
 class SuperbModel(pl.LightningModule):
 
-    def __init__(self, backbone: str,
+    def __init__(self, backbone: nn.Module,
                        augmenter: Augmenter,
-                       n_channels: int, 
-                       n_classes: int, 
-                       lr: float = 1e-4,
-                       weight: Optional[torch.Tensor] = None):
+                       optimizer: torch.optim.Optimizer,
+                       n_classes: int
+                       ):
 
-        self.backbone = backbone
-        self.n_channels = n_channels
-        self.n_classes = n_classes
-        self.lr = lr
-        self.kernel = (2, 2)
-        self.weight = weight
 
-        self.save_hyperparameters()
 
         super().__init__()
 
-        self.task           = "binary" if n_classes == 1 else "multilabel"
-        self.metrics        = nn.ModuleList(self.get_metrics(self.task, n_classes))
-        self.loss           = nn.BCEWithLogitsLoss(pos_weight=(weight[0]//weight[1]).float(), reduction="mean")
-        self.augmenter      = augmenter
-        self.pre_conv       = nn.Sequential(nn.Conv2d(in_channels=n_channels, out_channels=3, kernel_size=self.kernel, stride=1, padding=0), nn.ELU())
-        self.model          = self.get_model(backbone, n_classes)
-        
-    def get_model(self, backbone: str, n_classes: int):
+        self.n_classes = n_classes
+        self.optimizer = optimizer
 
-        if backbone == "custom":
-            model = CustomSuperbBackbone()
-        elif backbone == "efficientnet-b7":
-            model = efficientnet_b7(pretrained=False)
-            model.classifier[1] = nn.Linear(2560, n_classes)
-        elif backbone == "resnet34":
-            model = resnet34(pretrained=False)
-            n_features = model.fc.in_features
-            model.fc = nn.Linear(n_features, n_classes)
-        else:
-            raise ValueError("Backbone not implemented.")
-        
-        return model
+        # self.save_hyperparameters()
+
+        self.backbone = backbone
+        self.task           = "binary" if n_classes == 1 else "multilabel"
+        self.augmenter      = augmenter
+        self.pre_conv       = nn.Sequential(nn.Conv2d(in_channels=1, out_channels=3, kernel_size=(2, 2), stride=1, padding=0), nn.ELU())
+        self.model          = backbone
+        self.loss           = F.binary_cross_entropy_with_logits if self.task == "binary" else F.multilabel_soft_margin_loss
+        self.metrics        = nn.ModuleList(self.get_metrics(self.task, n_classes))
+        self.preprocess     = Preprocess()
+        self.val_augmenter  = Augmenter(p=0)
 
     def get_metrics(self, task, n_classes: int) -> List[torchmetrics.Metric]:
 
@@ -105,7 +106,7 @@ class SuperbModel(pl.LightningModule):
                 torchmetrics.Recall(task=task, num_classes=n_classes, average="macro"),
                 torchmetrics.F1Score(task=task, num_classes=n_classes, average="macro"),
                 # torchmetrics.PrecisionRecallCurve(task=task, num_classes=n_classes),
-                # torchmetrics.AUROC(task=task, num_classes=n_classes),
+                torchmetrics.AUROC(task=task, num_classes=n_classes),
                 # torchmetrics.ROC(task=task, num_classes=n_classes),
                 # torchmetrics.ConfusionMatrix(task=task, num_classes=n_classes),
             ]
@@ -117,6 +118,7 @@ class SuperbModel(pl.LightningModule):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         
         x = self.pre_conv(x)
+        # x = x.repeat(1, 3, 1, 1)
         x = self.model(x)
         x = x.view(-1, self.n_classes)
 
@@ -124,46 +126,69 @@ class SuperbModel(pl.LightningModule):
 
     def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
 
-        x, y = batch
-        x, y = x.unsqueeze(1), y.unsqueeze(1)
+        x, y, w = batch
+        x, y, w = x.unsqueeze(1), y.unsqueeze(1), w.unsqueeze(1)
+        w = torch.ones_like(y, dtype=torch.float)
         
         x = self.augmenter(x)
-
         y_hat = self(x)
-        loss = self.loss(y_hat, y.float())
 
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        loss = self.loss(y_hat, y.float(), weight=w)
 
-        return {"loss": loss, "y_hat": y_hat, "y": y}
+        self.log("train_loss", loss.cpu().item(), on_step=True, on_epoch=True, prog_bar=True, logger=True)
+
+        if batch_idx % 100 == 0:
+            self.logger.experiment.add_image("train_image", x[0, 0, :, :], self.current_epoch, dataformats="HW")
+
+        y_preds = torch.sigmoid(y_hat.detach())
+
+        return {"loss": loss, "y_hat": y_preds, "y": y}
     
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
 
-        x, y = batch
-        x, y = x.unsqueeze(1), y.unsqueeze(1)
+        x, y, w = batch
+        x, y, w = x.unsqueeze(1), y.unsqueeze(1), w.unsqueeze(1)
+        w = torch.ones_like(y, dtype=torch.float)
 
-        x = self.augmenter.normalize(x)
-        
+        x = self.val_augmenter(x)
+    
         y_hat = self(x)
 
-        loss = self.loss(y_hat, y.float())
+        loss = self.loss(y_hat, y.float(), weight=w)
+        y_preds = torch.sigmoid(y_hat)
         
-        self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True)
-
-        return {"loss": loss, "y_hat": y_hat, "y": y}
+        return {"loss": loss, "y_hat": y_preds, "y": y}
     
     def training_epoch_end(self, outputs: Dict[str, torch.Tensor]):
-        
-        for metric in self.metrics:
-            self.log("train_"+metric.__class__.__name__, metric(outputs["y_hat"], outputs["y"].float()), prog_bar=True, logger=True)
 
-    def validation_step_end(self, outputs: Dict[str, torch.Tensor]):
+        y_true = torch.cat([o['y'] for o in outputs])
+        y_pred = torch.cat([o['y_hat'] for o in outputs])
         
         for metric in self.metrics:
-            self.log("val_"+metric.__class__.__name__, metric(outputs["y_hat"], outputs["y"].float()), prog_bar=True, logger=True)
+            self.log("train_"+metric.__class__.__name__, metric(y_pred.cpu(), y_true.cpu().float()), prog_bar=False, logger=True)
+
+
+    def validation_epoch_end(self, outputs: Dict[str, torch.Tensor]):
+
+
+        loss = torch.stack([o['loss'] for o in outputs]).mean()
+        y_true = torch.cat([o['y'] for o in outputs])
+        y_pred = torch.cat([o['y_hat'] for o in outputs])
+
+        self.log("val_loss", loss.cpu().item(), on_epoch=True, prog_bar=True, logger=True)
+        
+
+        for metric in self.metrics:
+            self.log("val_"+metric.__class__.__name__, metric(y_pred.cpu(), y_true.cpu().float()), prog_bar=False, logger=True)
+
+        if isinstance(self.logger, TensorBoardLogger):
+            self.logger.experiment.add_figure("predictions", plot_prediction_histogram(y_pred.cpu().flatten(), y_true.cpu().flatten(), title="Test"), self.current_epoch)
 
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
-        return torch.optim.Adam(self.parameters(), lr=self.lr)
+        # return torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        # return torch.optim.SGD(self.parameters(), lr=self.lr, momentum=self.momentum, weight_decay=self.weight_decay)
+        return self.optimizer
     
 
 class SimSiam(pl.LightningModule):

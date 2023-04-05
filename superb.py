@@ -15,7 +15,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import utils
 import torch.nn as nn
-from augmentations import Normalize
+from augmentations import Preprocess
+from kornia import augmentation as K
 
 has_compression = lambda x: \
     int(x.get("GRAD_MORF", 0) or 0) > 0 or \
@@ -23,11 +24,11 @@ has_compression = lambda x: \
     int(x.get("TYP", 0) or 0) > 0
 
 
+
 class SuperbDataset(Dataset):
     
     def __init__(self, 
                  patients_root: Path, 
-                 label_type: str = "binary", 
                  target_size: Tuple[int, int] = imaging.PADDING_SHAPE,
                  removed: List[str] = [], 
                  class_distribution: Dict[int, int] = {}) -> None:
@@ -37,9 +38,9 @@ class SuperbDataset(Dataset):
         self.removed = removed
         self.patients_root = patients_root
         self.patient_dirs = [patient_dir for patient_dir in patients_root.glob("*") if patient_dir.is_dir() and (patient_dir.name not in self.removed)]
-        self.label_type = label_type
         self.target_size = target_size
         self.class_distribution = class_distribution
+        self.preprocess = Preprocess(target_size=self.target_size)
 
         # First index: GRAD_VISUELL
         # 1: mild compression
@@ -73,50 +74,44 @@ class SuperbDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
 
-        image, label = self._read_patient_dir(self.patient_dirs[idx])
-
-        return image, label
+        return self._read_patient_dir(self.patient_dirs[idx])
     
     def get_idx(self, id: str, label_override=True) -> Tuple[torch.Tensor, torch.Tensor]:
         
-        image, label = self._read_patient_dir(self.patient_dirs[id], label_override=label_override)
+        return self._read_patient_dir(self.patient_dirs[id], label_override=label_override)
 
-        return image, label
     
     def get_patient(self, id: str) -> Tuple[torch.Tensor, torch.Tensor]:
             
-        image, label = self._read_patient_dir(self.patients_root / id)
-        
-        return image, label
-    
+        return self._read_patient_dir(self.patients_root / id)
+            
     def _read_patient_dir(self, patient_dir: Path, label_override: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
          
         patient_id = patient_dir.name
         image_path = patient_dir / "lateral" / (patient_id + ".tiff")
         label_path = patient_dir / "lateral" / (patient_id + ".json")
-        image   = cv2.imread(str(image_path), -1)
-        image   = (image // 256).astype(np.uint8)
-        image   = cv2.resize(image, self.target_size)
 
+        assert image_path.exists(), f"Image path does not exist: {image_path}"
+        assert label_path.exists(), f"Label path does not exist: {label_path}"
 
-        with open(label_path, "r") as f:
-            label = json.load(f)
+        # Read image
+        image = self.preprocess(str(image_path))
 
-        if label_override:
-            encoded = label
+        # Get label
+        if not label_override:
+            label = self.label_from_path(label_path)
         else:
-            if self.label_type == "binary":
-                encoded = self._binary_label(label)
-            elif self.label_type == "multilabel":
-                encoded = self._categorical_label(label)
-            else:
-                encoded = label
+            with open(label_path, "r") as f:
+                label = json.load(f)
+        
+        # Get weight
+        weight = self.weight_from_class_distribution(label)
 
-        return image, encoded
+        return image, label, weight
     
     def visualize_item(self, idx, **kwargs) -> Tuple[plt.Figure, plt.Axes]:
             
-        image, label = self._read_patient_dir(self.patient_dirs[idx], label_override=True)
+        image, label, weight = self._read_patient_dir(self.patient_dirs[idx], label_override=True)
         
         f, ax = self.plot(image, label, **kwargs)
 
@@ -124,7 +119,7 @@ class SuperbDataset(Dataset):
     
     def visualize_patient(self, id, **kwargs) -> Tuple[plt.Figure, plt.Axes]:
             
-        image, label = self._read_patient_dir(self.patients_root / id, label_override=True)
+        image, label, weight = self._read_patient_dir(self.patients_root / id, label_override=True)
         
         f, ax = self.plot(image, label, **kwargs)
 
@@ -133,23 +128,59 @@ class SuperbDataset(Dataset):
     def plot(self, image, label, scale=1.2, offset=[200,50]) -> Tuple[plt.Figure, plt.Axes]:
 
         w, h = matplotlib.figure.figaspect(image)
-        fig = plt.figure(figsize=(scale*w, scale*h))
-        ax = fig.add_subplot(111)
+        fig, ax = plt.subplots(figsize=(scale*w, scale*h))
 
-        ax.imshow(image[0, :, :], cmap='gray', origin='lower')
+        ax.imshow(image, cmap='gray')
         ax.set_title(label["id"])
+
         return fig, ax
     
-    def _binary_label(self, label: Dict[str, Any]) -> torch.Tensor:
-         
-        return torch.tensor(int(any([has_compression(label[vertebra]) for vertebra in labelling.VERTEBRA_NAMES]) == True))
+    def label_from_path(self, path: Union[str, Path]) -> torch.Tensor:
+
+        # Read label metadata
+        with open(path, "r") as f:
+            metadata = json.load(f)
+        
+        return metadata
     
-    def _categorical_label(self, label: Dict[str, Any]) -> torch.Tensor:
-         
+    def weight_from_class_distribution(self, label: Dict[str, Any]) -> torch.Tensor:
+
+        return 1.0
+
+
+class BinaryDataset(SuperbDataset):
+
+    def label_from_path(self, path: str) -> torch.Tensor:
+
+        # Read label metadata
+        with open(path, "r") as f:
+            metadata = json.load(f)
+        
+        return torch.tensor(int(any([has_compression(metadata[vertebra]) for vertebra in labelling.VERTEBRA_NAMES]) == True))
+    
+    def weight_from_class_distribution(self, y: torch.Tensor) -> torch.Tensor:
+
+        # Get weight for class imbalance
+        if self.class_distribution:
+            weight = ( self.class_distribution[str(y.item())] ) / len(self)
+            # print(weight)
+            return 1-weight
+        else:
+            return 1.0
+    
+class CategoricalDataset(SuperbDataset):
+
+
+    def label_from_path(self, path: str) -> torch.Tensor:
+        
+        # Read label metadata
+        with open(path, "r") as f:
+            metadata = json.load(f)
+
         vertebra_list = []
         for vertebra in labelling.VERTEBRA_NAMES:
-            visual = label[vertebra].get("GRAD_VISUELL") if label[vertebra].get("GRAD_VISUELL") else 0
-            type   = label[vertebra].get("TYP") if label[vertebra].get("TYP") else 0
+            visual = metadata[vertebra].get("GRAD_VISUELL") if metadata[vertebra].get("GRAD_VISUELL") else 0
+            type   = metadata[vertebra].get("TYP") if metadata[vertebra].get("TYP") else 0
             target  = 1.0 if self.fracture_map[(visual, type)] > 0 else 0.0
 
             vertebra_list.append(target)
