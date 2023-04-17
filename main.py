@@ -43,7 +43,7 @@ def main():
     SEVERITY            = 0
 
     parser.add_argument('--source', type=str, default='~/data/balder/datasets/superb/patients')
-    parser.add_argument('--cfg', type=str, nargs='+', default=CONFIG_PATH)
+    parser.add_argument('--cfg', type=str, default=CONFIG_PATH)
     parser.add_argument('--batch_size', type=int, default=BATCH_SIZE)
     parser.add_argument('--n_workers', type=int, default=N_WORKERS)
     parser.add_argument('--train_fraction', type=int, default=TRAIN_FRACTION)
