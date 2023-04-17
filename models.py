@@ -2,7 +2,7 @@ import torch
 from torch.nn import functional as F
 from torchvision import transforms as T
 import torch.nn as nn
-from torchvision.models import resnet18, resnet34, efficientnet_b7
+import torchvision.models as models
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger, CSVLogger
 import matplotlib.pyplot as plt
@@ -48,26 +48,35 @@ class ConvBlock(nn.Module):
 
 class CustomSuperbBackbone(nn.Module):
 
-    def __init__(self, n_classes: int = 1):
+    def __init__(self, in_channels: int = 1, n_classes: int = 1):
 
+        self.in_channels = in_channels
         self.n_classes = n_classes
 
         super().__init__()
 
+        self.n_layers = 5
+
         self.model = nn.Sequential(
-            ConvBlock(3, 16, 3),
-            *[ConvBlock(16*(2**i), 16*(2**(i+1)), 3) for i in range(7)],
+            ConvBlock(self.in_channels, 16, 3),
+            *[ConvBlock(16*(2**i), 16*(2**(i+1)), 3) for i in range(self.n_layers)],
+            nn.AdaptiveAvgPool2d((1, 1)),
+        )
+
+        self.head = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(8192, 2048),
+            nn.Linear(16*(2**self.n_layers), 512),
             nn.ELU(),
-            nn.Linear(2048, 1024),
-            nn.ELU(),
-            nn.Linear(1024, self.n_classes),
+            nn.Linear(512, n_classes)
         )
 
     def forward(self, x):
             
-            return self.model(x)
+        x = self.model(x)
+        x = torch.flatten(x, 1)
+        x = self.head(x)
+
+        return x
 
 
 class SuperbModel(pl.LightningModule):
@@ -90,7 +99,7 @@ class SuperbModel(pl.LightningModule):
         self.backbone = backbone
         self.task           = "binary" if n_classes == 1 else "multilabel"
         self.augmenter      = augmenter
-        self.pre_conv       = nn.Sequential(nn.Conv2d(in_channels=1, out_channels=3, kernel_size=(2, 2), stride=1, padding=0), nn.ELU())
+        # self.pre_conv       = nn.Sequential(nn.Conv2d(in_channels=1, out_channels=3, kernel_size=(2, 2), stride=1, padding=0), nn.ELU())
         self.model          = backbone
         self.loss           = F.binary_cross_entropy_with_logits if self.task == "binary" else F.multilabel_soft_margin_loss
         self.metrics        = nn.ModuleList(self.get_metrics(self.task, n_classes))
@@ -117,7 +126,7 @@ class SuperbModel(pl.LightningModule):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         
-        x = self.pre_conv(x)
+        # x = self.pre_conv(x)
         # x = x.repeat(1, 3, 1, 1)
         x = self.model(x)
         x = x.view(-1, self.n_classes)
@@ -241,7 +250,7 @@ class SimSiam(pl.LightningModule):
 
         self.save_hyperparameters()
 
-        self.encoder = resnet34(pretrained=False)
+        self.encoder = models.resnet50(pretrained=False)
         previous_dim = self.encoder.fc.in_features
 
         # Update the3 encoder's fc layer to output the desired dimension

@@ -1,4 +1,4 @@
-from models import SuperbModel
+from models import SuperbModel, CustomSuperbBackbone
 from augmentations import Augmenter
 from superb import BinaryDataset, CategoricalDataset
 from torch.utils.data import Subset, DataLoader, WeightedRandomSampler
@@ -73,7 +73,7 @@ def main():
     with open(args.cfg, 'r') as f:
         config = json.load(f)
 
-    DATA_ROOT               = args.source
+    DATA_ROOT               = Path(args.source)
     REMOVED                 = config["removed"]
     RESIZE_SHAPE            = config["min_shape"]
     CLASS_DISTRIBUTION      = config["class_distribution"][args.label_type]
@@ -148,17 +148,20 @@ def main():
     # Define model
     augmenter   = Augmenter(p=0.5)
     # backbone    = models.resnet50(pretrained=False, num_classes=n_classes)
-    backbone    = models.resnet50(pretrained=True, num_classes=1000)
-    for param in backbone.parameters():
-        param.requires_grad = False
+    # backbone    = models.resnet50(pretrained=True, num_classes=1000)
+    # for param in backbone.parameters():
+    #     param.requires_grad = False
 
-    out_features = backbone.fc.in_features
+    # out_features = backbone.fc.in_features
     
-    backbone.fc = nn.Sequential(
-        nn.Linear(out_features, n_classes),
-        # nn.ReLU(inplace=True),
-        # nn.Linear(out_features // 2, n_classes)
-    )
+    # backbone.fc = nn.Sequential(
+    #     nn.Linear(out_features, n_classes),
+    #     # nn.ReLU(inplace=True),
+    #     # nn.Linear(out_features // 2, n_classes)
+    # )
+
+    backbone = CustomSuperbBackbone(n_classes)    
+
     # optimizer   = torch.optim.Adam(backbone.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     optimizer   = torch.optim.SGD(backbone.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     model       = SuperbModel(backbone, augmenter, optimizer, n_classes)
