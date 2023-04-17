@@ -64,7 +64,7 @@ class Normalize(nn.Module):
     
 class CLAHE(nn.Module):
     
-        def __init__(self, clipLimit: float = 0.8, tileGridSize: Tuple[int, int] = (8, 8)):
+        def __init__(self, clipLimit: float = 0.9, tileGridSize: Tuple[int, int] = (8, 8)):
             super().__init__()
             self.clipLimit = clipLimit
             self.tileGridSize = tileGridSize
@@ -84,10 +84,11 @@ class Augmenter(nn.Module):
 
         self.augment = K.AugmentationSequential(
             # T.RandomApply([CLAHE()], p=p),
+            CLAHE(),
             K.RandomHorizontalFlip(p=p),
             K.RandomVerticalFlip(p=p),
-            K.RandomCrop((512, 512), p=1),
-            T.RandomApply([CLAHE()], p=p),
+            # K.RandomCrop((512, 512), p=1),
+            # T.RandomApply([CLAHE()], p=p),
             # K.RandomRotation(degrees=15, p=p),
             # K.RandomEqualize(p=p),
             # K.RandomSharpness(sharpness=(0.5, 2.0), p=p),

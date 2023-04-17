@@ -40,7 +40,9 @@ def main():
     LOG_DIR             = './logs'
     LABEL_TYPE          = 'binary'
     NAME                = 'superb'
+    SEVERITY            = 0
 
+    parser.add_argument('--source', type=str, default='~/data/balder/datasets/superb/patients')
     parser.add_argument('--cfg', type=str, nargs='+', default=CONFIG_PATH)
     parser.add_argument('--batch_size', type=int, default=BATCH_SIZE)
     parser.add_argument('--n_workers', type=int, default=N_WORKERS)
@@ -56,6 +58,8 @@ def main():
     parser.add_argument('--backbone', type=str, default=BACKBONE)
     parser.add_argument('--log_dir', type=str, default=LOG_DIR)
     parser.add_argument('--name', type=str, default=NAME)
+    parser.add_argument('--severity', type=int, default=SEVERITY)
+
 
 
     args = parser.parse_args()
@@ -69,7 +73,7 @@ def main():
     with open(args.cfg, 'r') as f:
         config = json.load(f)
 
-    DATA_ROOT               = Path(config["data_root"])
+    DATA_ROOT               = args.source
     REMOVED                 = config["removed"]
     RESIZE_SHAPE            = config["min_shape"]
     CLASS_DISTRIBUTION      = config["class_distribution"][args.label_type]
@@ -86,7 +90,7 @@ def main():
 
     # Load data
     if args.label_type == 'binary':
-        dataset     = BinaryDataset(DATA_ROOT, RESIZE_SHAPE, REMOVED, CLASS_DISTRIBUTION)
+        dataset     = BinaryDataset(DATA_ROOT, RESIZE_SHAPE, REMOVED, CLASS_DISTRIBUTION, severity=args.severity, mode='severity')
         n_classes   = 1
     elif args.label_type == 'multilabel':
         dataset = CategoricalDataset(DATA_ROOT, RESIZE_SHAPE, REMOVED, CLASS_DISTRIBUTION)
@@ -94,17 +98,51 @@ def main():
     else:
         raise ValueError('Label type not recognized')
     
+    # Undersample dataset
+    idxs = [i for i, (_, y, _) in enumerate(dataset) if torch.minimum(y, torch.tensor(1)).item() == 1]
+    jdxs = [i for i, (_, y, _) in enumerate(dataset) if y == 0]
+
+    # Randomly sample from the majority class
+    np.random.seed(args.seed)
+    jdxs = np.random.choice(jdxs, len(idxs), replace=False)
+
+    all_idxs = np.concatenate((idxs, jdxs))
+    dataset = Subset(dataset, all_idxs)
+    
     # Split data to ensure balanced classes in train and validation sets
-    idxs = np.arange(len(dataset))
+    # idxs = np.arange(len(dataset))
+
+    # ys   = np.array([y for _, y, _ in dataset])
+    # sss = StratifiedShuffleSplit(
+    #     n_splits=1, 
+    #     test_size=1-args.train_fraction, 
+    #     # test_size=dataset.class_distribution[0],
+    #     random_state=args.seed
+    #     )
+    # train_idx, val_idx = next(sss.split(idxs, ys))
+
+    # train_dataset       = Subset(dataset, train_idx)
+    # validation_dataset  = Subset(dataset, val_idx)
+
+    #
+
     ys   = np.array([y for _, y, _ in dataset])
-    sss = StratifiedShuffleSplit(n_splits=1, test_size=1-args.train_fraction, random_state=args.seed)
-    train_idx, val_idx = next(sss.split(idxs, ys))
+    sss = StratifiedShuffleSplit(
+        n_splits=1, 
+        test_size=1-args.train_fraction, 
+        # test_size=dataset.class_distribution[0],
+        random_state=args.seed
+        )
+    train_idx, val_idx = next(sss.split(all_idxs, ys))
 
     train_dataset       = Subset(dataset, train_idx)
     validation_dataset  = Subset(dataset, val_idx)
-    weighted_sampler    = WeightedRandomSampler([w for _, _, w in train_dataset], len(train_dataset))
-    train_dataloader    = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.n_workers, sampler=weighted_sampler)
-    # train_dataloader    = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.n_workers, shuffle=True)
+
+    print(f"Train set size: {len(train_dataset)}")
+    print(f"Validation set size: {len(validation_dataset)}")
+    
+
+    train_dataloader    = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.n_workers, shuffle=True)
     val_dataloader      = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.n_workers)
 
     # Define model
@@ -117,14 +155,14 @@ def main():
     out_features = backbone.fc.in_features
     
     backbone.fc = nn.Sequential(
-        nn.Linear(out_features, out_features // 2),
-        nn.ReLU(inplace=True),
-        nn.Linear(out_features // 2, n_classes)
+        nn.Linear(out_features, n_classes),
+        # nn.ReLU(inplace=True),
+        # nn.Linear(out_features // 2, n_classes)
     )
     # optimizer   = torch.optim.Adam(backbone.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     optimizer   = torch.optim.SGD(backbone.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     model       = SuperbModel(backbone, augmenter, optimizer, n_classes)
-    trainer     = pl.Trainer(accelerator="gpu", max_epochs=args.n_epochs, logger=[tb_logger, csv_logger], callbacks=[checkpoint], log_every_n_steps=5)
+    trainer     = pl.Trainer(accelerator=args.device, max_epochs=args.n_epochs, logger=[tb_logger, csv_logger], callbacks=[checkpoint], log_every_n_steps=5)
 
     # Train model
     torch.set_float32_matmul_precision('medium')

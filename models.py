@@ -129,6 +129,9 @@ class SuperbModel(pl.LightningModule):
         x, y, w = batch
         x, y, w = x.unsqueeze(1), y.unsqueeze(1), w.unsqueeze(1)
         w = torch.ones_like(y, dtype=torch.float)
+
+        # Labels are not binary but ordinal, and must be max 1
+        y = torch.minimum(y, torch.ones_like(y))
         
         x = self.augmenter(x)
         y_hat = self(x)
@@ -150,14 +153,26 @@ class SuperbModel(pl.LightningModule):
         x, y, w = x.unsqueeze(1), y.unsqueeze(1), w.unsqueeze(1)
         w = torch.ones_like(y, dtype=torch.float)
 
+        # Labels are not binary but ordinal, and must be max 1
+        y_binary = torch.minimum(y, torch.ones_like(y))
+
+        # Preprocessing of x
         x = self.val_augmenter(x)
-    
+
+        # Ger predictions for all severities
         y_hat = self(x)
 
-        loss = self.loss(y_hat, y.float(), weight=w)
+        loss = self.loss(y_hat, y_binary.float(), weight=w, reduction="none")
+
+        # Apply sigmoid to predictions
         y_preds = torch.sigmoid(y_hat)
         
-        return {"loss": loss, "y_hat": y_preds, "y": y}
+        return {
+            "loss": loss, 
+            "y_hat": y_preds, 
+            "y_binary": y_binary,
+            "y": y,
+            }
     
     def training_epoch_end(self, outputs: Dict[str, torch.Tensor]):
 
@@ -170,24 +185,45 @@ class SuperbModel(pl.LightningModule):
 
     def validation_epoch_end(self, outputs: Dict[str, torch.Tensor]):
 
-
-        loss = torch.stack([o['loss'] for o in outputs]).mean()
-        y_true = torch.cat([o['y'] for o in outputs])
+        # Aggregate loss
+        y_true = torch.cat([o['y_binary'] for o in outputs])
         y_pred = torch.cat([o['y_hat'] for o in outputs])
+        overall_loss = torch.cat([o['loss'].squeeze() for o in outputs]).view_as(y_true)
+        mean_loss = overall_loss.mean()
 
-        self.log("val_loss", loss.cpu().item(), on_epoch=True, prog_bar=True, logger=True)
-        
+        self.log("val_loss", mean_loss.cpu().item(), on_epoch=True, prog_bar=True, logger=True)
 
+        # Aggregate metrics
         for metric in self.metrics:
             self.log("val_"+metric.__class__.__name__, metric(y_pred.cpu(), y_true.cpu().float()), prog_bar=False, logger=True)
 
         if isinstance(self.logger, TensorBoardLogger):
             self.logger.experiment.add_figure("predictions", plot_prediction_histogram(y_pred.cpu().flatten(), y_true.cpu().flatten(), title="Test"), self.current_epoch)
 
+        # Now handle the different severities separately
+        y = torch.cat([o['y'] for o in outputs])
+
+        # Separate indices by severity
+        idx = {
+            "mild": y == 1,
+            "moderate": y == 2,
+            "severe": y == 3,
+        }
+
+        # For each severity
+        for severity in idx.keys():
+
+            # Aggregate loss
+            loss = overall_loss[idx[severity]].mean()
+
+            self.logger.experiment.add_scalars('val_loss', {severity: loss.cpu().item()}, self.current_epoch)
+
+            # Aggregate metrics
+            for metric in self.metrics:
+                self.logger.experiment.add_scalars('val_'+metric.__class__.__name__, {severity: metric(y_pred.cpu(), y_true.cpu().float())}, self.current_epoch)
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
-        # return torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-        # return torch.optim.SGD(self.parameters(), lr=self.lr, momentum=self.momentum, weight_decay=self.weight_decay)
+
         return self.optimizer
     
 

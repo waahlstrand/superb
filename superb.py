@@ -25,6 +25,47 @@ has_compression = lambda x: \
 
 
 
+class Compression:
+
+    def __init__(self, severity: int, mode: str = "exists") -> None:
+        
+        self.severity = severity
+        self.mode = mode
+
+    def __call__(self, x: Dict[str, str]) -> bool:
+
+        grad_morf    = x.get("GRAD_MORF")
+        grad_visuell = x.get("GRAD_VISUELL")
+        typ          = x.get("TYP")
+
+        if grad_morf is None:
+            grad_morf = 0
+        else:
+            grad_morf = float(grad_morf)
+        
+        if grad_visuell is None:
+            grad_visuell = 0
+        else:
+            grad_visuell = int(grad_visuell)
+
+        if typ is None:
+            typ = 0
+        else:
+            typ = int(typ)
+
+        has_compression = all([grad_morf > 0, grad_visuell > self.severity, typ > 0])
+
+        if has_compression and any([grad_morf == 0, grad_visuell == self.severity, typ == 0]):
+            raise ValueError(f"Inconsistencies in compression labels. {x}")
+        
+        if self.mode == "exists":
+            return has_compression
+        elif self.mode == "severity":
+            return grad_visuell
+        else:
+            raise ValueError(f"Unknown compression mode: {self.mode}")
+
+
 class SuperbDataset(Dataset):
     
     def __init__(self, 
@@ -79,14 +120,17 @@ class SuperbDataset(Dataset):
     def get_idx(self, id: str, label_override=True) -> Tuple[torch.Tensor, torch.Tensor]:
         
         return self._read_patient_dir(self.patient_dirs[id], label_override=label_override)
-
     
     def get_patient(self, id: str) -> Tuple[torch.Tensor, torch.Tensor]:
             
         return self._read_patient_dir(self.patients_root / id)
-            
-    def _read_patient_dir(self, patient_dir: Path, label_override: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
-         
+    
+    def get_raw(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        
+        return self._image_label_from_dir(self.patient_dirs[idx], label_override=False)
+
+    def _image_label_from_dir(self, patient_dir: Path, label_override: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+        
         patient_id = patient_dir.name
         image_path = patient_dir / "lateral" / (patient_id + ".tiff")
         label_path = patient_dir / "lateral" / (patient_id + ".json")
@@ -103,6 +147,13 @@ class SuperbDataset(Dataset):
         else:
             with open(label_path, "r") as f:
                 label = json.load(f)
+        
+        return image, label
+            
+    def _read_patient_dir(self, patient_dir: Path, label_override: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+         
+        # Read image and label
+        image, label = self._image_label_from_dir(patient_dir, label_override=label_override)
         
         # Get weight
         weight = self.weight_from_class_distribution(label)
@@ -146,30 +197,71 @@ class SuperbDataset(Dataset):
     def weight_from_class_distribution(self, label: Dict[str, Any]) -> torch.Tensor:
 
         return 1.0
-
+    
+    def get_class_distribution(self) -> Dict[str, int]:
+        
+        return {}
+    
 
 class BinaryDataset(SuperbDataset):
+
+    def __init__(self, *args, severity: int = 0, mode: str = "exists", **kwargs) -> None:
+        
+        super().__init__(*args, **kwargs)
+
+        self.severity = severity 
+        self.mode = mode
+        self.has_compression = Compression(severity=self.severity, mode=self.mode)
+        self.class_distribution = self.get_class_distribution()
 
     def label_from_path(self, path: str) -> torch.Tensor:
 
         # Read label metadata
         with open(path, "r") as f:
             metadata = json.load(f)
+
+        if self.mode == "exists":
+            return torch.tensor(int(any([self.has_compression(metadata[vertebra]) for vertebra in labelling.VERTEBRA_NAMES]) == True))
+        elif self.mode == "severity":
+            return torch.tensor(int(max([self.has_compression(metadata[vertebra]) for vertebra in labelling.VERTEBRA_NAMES])))
+        else:
+            raise ValueError(f"Mode {self.mode} not supported.")
         
-        return torch.tensor(int(any([has_compression(metadata[vertebra]) for vertebra in labelling.VERTEBRA_NAMES]) == True))
     
     def weight_from_class_distribution(self, y: torch.Tensor) -> torch.Tensor:
 
+        # Convert to binary
+        label = torch.minimum(y, torch.tensor(1)).item()
+
         # Get weight for class imbalance
         if self.class_distribution:
-            weight = ( self.class_distribution[str(y.item())] ) / len(self)
-            # print(weight)
-            return 1-weight
+            weight = ( self.class_distribution[label] ) / len(self)
+            
+            return 1.0
         else:
             return 1.0
+        
+    def get_class_distribution(self) -> Dict[str, int]:
+        
+        class_distribution = {}
+        for idx in tqdm(range(len(self)), desc="Calculating class distribution..."):
+
+            image, label = self.get_raw(idx)
+
+            # Convert to binary
+            label = torch.minimum(label, torch.tensor(1)).item()
+
+            if label not in class_distribution:
+
+                class_distribution[label] = 0
+
+            class_distribution[label] += 1
+
+        print("\n Class distribution:", class_distribution, "\n")
+        
+        return class_distribution
     
 class CategoricalDataset(SuperbDataset):
-
 
     def label_from_path(self, path: str) -> torch.Tensor:
         
