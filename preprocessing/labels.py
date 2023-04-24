@@ -47,25 +47,40 @@ def excel_to_dict(df: pd.DataFrame) -> Dict[str, Dict[str, str]]:
     """
     Converts a pandas dataframe to a dictionary.
     """
+
+    df = df.iloc[1:] # Remove header
+    df = df.fillna(0) # Replace NaN with 0
+
+    df = df.set_index("ID", inplace=False) # Set ID as index
+
+    # Normalize the column names
+    df.columns = df.columns.str.strip()
+
+    # Create a dictionary
     d = {}
     for idx, row in df.iterrows():
-        d[row["ID"]] = {}
+        d[idx] = {}
 
         for vertebra in VERTEBRA_NAMES:
 
-            d[row["ID"]][vertebra] = {}
+            d[idx][vertebra] = {}
             
             for col in COLS:
+
+                d[idx][vertebra][col] = 0.0
                 
-                if (vertebra == "L4" or vertebra == "L3") and (col == "GRAD_VISUELL" or col == "_EJ_BEDÖMBAR"):
-                    d[row["ID"]][vertebra][col] = None
+                if hasattr(row, vertebra + col):
+                    d[idx][vertebra][col] = getattr(row, vertebra + col)
                 else:
-                    d[row["ID"]][vertebra][col] = getattr(row, vertebra + col)
+                    print(row.to_string())
+                    raise ValueError(f"Could not find {vertebra + col} in row {row}")
 
         for col in OTHER_COLS:
-            d[row["ID"]][col] = getattr(row, col)
+            d[idx][col] = getattr(row, col)
 
     return d
+
+
 
 def excel_to_records(df: pd.DataFrame, only_auditable=False) -> List[Dict[str, str]]:
     """
