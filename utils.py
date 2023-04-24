@@ -236,3 +236,109 @@ def build_patient_directory_tree(dcm_root: Path, labels_path: Path, target_root:
             lacks_vfa.append(image_patient_id)
 
     return lacks_vfa
+
+
+def build_new_patient_directory_tree(dcm_root: Path, labels_path: Path, target_root: Path):
+    """
+    Build a directory tree for the patient data.
+    
+    Structure:
+        - patient_id
+            - lateral
+                - patient_id.tiff
+                - patient_id.json
+                - patient_id.dcm
+            - reports
+                - [...].dcm
+
+    Args:
+        dcm_root (Path): The root directory containing the DICOM files.
+        labels_path (Path): The path to the labels Excel file.
+        target_root (Path): The root directory to which the directory tree will be built.
+    """
+
+    files   = list(dcm_root.glob("*.dcm"))
+    labels  = pd.read_excel(labels_path)
+
+    is_vfa_dicom = lambda x: ANNOTATION_TAG in x
+
+    # Group files by patient
+    lacks_vfa = []
+
+    # Get labels
+    labels = labelling.excel_to_dict(labels)
+
+    patient_has_vfa = {}
+    not_in_excel = []
+
+    for file in tqdm(files, desc="Iterating over patient dicom files"):
+
+        has_vfa = False
+
+        # Open the dicom files
+        d = pydicom.dcmread(file)
+
+        # Extract the patient ID
+        patient_id = labelling.image_id_to_excel_id(d.PatientID)
+
+        # Check if the patient already has a directory
+        lateral_file_dir =  target_root / patient_id / "lateral" 
+        report_file_dir  = target_root / patient_id / "reports"
+
+        if not os.path.exists(lateral_file_dir):
+            os.makedirs(lateral_file_dir)
+
+        if not os.path.exists(report_file_dir):
+            os.makedirs(report_file_dir)
+
+        # If the file is a VFA dicom file
+        #  - Create a renamed dicom file
+        #  - Download the image as an easy access tiff
+        #  - Get the label for the image
+        #  - Save all the files
+        if is_vfa_dicom(d):
+            has_vfa = True
+
+            # Create a renamed dicom file
+            new_dcm_file    = lateral_file_dir / (patient_id + ".dcm")
+
+            # Download the image as an easy access tiff
+            new_image_file  = lateral_file_dir / (patient_id + ".tiff")
+
+            # Get the label for the image
+            new_label_file  = lateral_file_dir / (patient_id + ".json")
+
+            # Save all the files
+            ## Save the dicom file
+            d.save_as(new_dcm_file)
+
+            ## Easiest with PIL
+            Image.fromarray(d.pixel_array).save(new_image_file)
+
+            ## Handle the label information sources
+            dx, dy     = d.PixelSpacing
+            try:
+                label      = labels[patient_id]
+            except KeyError:
+                not_in_excel.append(patient_id)
+                continue
+
+            label.update({"pixel_spacing": [dx, dy]})
+
+            with open(new_label_file, "w") as f:
+                json.dump(label, f, indent=4)
+                
+        # If the file is not a VFA dicom file, it is a report
+        else:
+            # Create a renamed dicom file
+            new_dcm_file = report_file_dir / file.name
+
+            # Save the dicom file
+            d.save_as(new_dcm_file)
+
+        # Release memory of dicom file
+        del d
+        
+        patient_has_vfa[patient_id] = has_vfa
+
+    return patient_has_vfa, not_in_excel

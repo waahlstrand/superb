@@ -17,4 +17,4 @@ if __name__ == "__main__":
     labels = Path(args.labels)
 
     # Build the directory tree
-    utils.build_patient_directory_tree(source, labels, target)
+    utils.build_new_patient_directory_tree(source, labels, target)
