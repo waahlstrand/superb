@@ -1,4 +1,4 @@
-from patients import Patient
+from slask.patients import Patient
 import pydicom
 import numpy as np
 
@@ -11,7 +11,8 @@ MAX_HEIGHT = 1656
 NORMALIZATION = (1000, 4000) # Approximate maximum pixel value of all images
 SHAPE = (512, 1024)
 # PADDING_SHAPE = (600, 1800)
-PADDING_SHAPE = (1800, 600)
+# PADDING_SHAPE = (1800, 600)
+PADDING_SHAPE = (300, 100)
 
 
 normalize = lambda x: (np.clip(x, NORMALIZATION[0], NORMALIZATION[1]).astype(np.float64) - NORMALIZATION[0]) / (NORMALIZATION[1] - NORMALIZATION[0])

@@ -1,6 +1,7 @@
-import utils
+from utils import structure
 from pathlib import Path
 import argparse
+import json
 
 if __name__ == "__main__":
     
@@ -9,12 +10,25 @@ if __name__ == "__main__":
     parser.add_argument('--source', type=str)
     parser.add_argument('--target', type=str)
     parser.add_argument('--labels', type=str)
+    parser.add_argument('--pdfs', type=str)
 
-    args = parser.parse_args()
 
-    source = Path(args.source)
-    target = Path(args.target)
-    labels = Path(args.labels)
+    args    = parser.parse_args()
+
+    source  = Path(args.source)
+    target  = Path(args.target)
+    labels  = Path(args.labels)
+    pdfs    = Path(args.pdfs)
 
     # Build the directory tree
-    utils.build_new_patient_directory_tree(source, labels, target)
+    patient_has_vfa, not_in_excel, errors = structure.build_patient_directory_tree(source, pdfs, labels, target)
+
+    # Save results to file
+    with open("patient_has_vfa.json", "w") as f:
+        json.dump(patient_has_vfa, f, indent=4)
+
+    with open("not_in_excel.json", "w") as f:
+        json.dump(not_in_excel, f, indent=4)
+    
+    with open("errors.json", "w") as f:
+        json.dump(errors, f, indent=4)

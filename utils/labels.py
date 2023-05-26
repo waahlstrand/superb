@@ -2,7 +2,7 @@ import pandas as pd
 from typing import *
 import json
 from pathlib import Path
-
+import numpy as np
 THORACIC = [
     "T12", "T11", "T10", "T9", "T8", "T7", "T6", "T5", "T4"
 ]
@@ -168,6 +168,23 @@ def image_id_to_excel_id(id: str) -> str:
     else:
         return id
     
+def pdf_name_to_moid(pdf_name: Path):
+    file_moid = "MO"+pdf_name.name.removesuffix(".pdf").split("MO")[-1].zfill(4)
+    
+    # Split and remove e.g. "_LJ, _Revert, _1"
+    file_moid = file_moid.split("_")[0]
+
+    # Remove LJ and KR from moid
+    file_moid = file_moid.removesuffix("LJ").removesuffix("KR")
+
+    
+    if len(file_moid) == 5:
+        moid = image_id_to_excel_id(file_moid)
+    else:
+        moid = file_moid
+
+    return moid
+    
 has_grad_morf = lambda x: x["GRAD_MORF"] != 0
 has_vertebra_with_grad_morf = lambda x: any([x[vertebra]["GRAD_MORF"] != 0 for vertebra in VERTEBRA_NAMES])
 
@@ -189,3 +206,14 @@ def build_conversion_dicts(path: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
 
 
     return image_to_excel, excel_to_image
+
+
+def bbox_from_annotation(annotation: np.ndarray) -> Tuple[float, float, float, float]:
+    """
+    Returns the bounding box of an annotation in the format (x, y, width, height).
+    """
+    x = annotation[:, 0]
+    y = annotation[:, 1]
+
+    return min(x), min(y), max(x) - min(x), max(y) - min(y)
+

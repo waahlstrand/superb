@@ -5,7 +5,9 @@ imgs/
 old/
 logs/
 configs/
-models/
+models/detr/
+slask/
+checkpoints/
 
 # Extensions
 *.pyc
