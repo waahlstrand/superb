@@ -68,6 +68,7 @@ def main():
     parser.add_argument('-s', '--resize_shape', nargs='+', type=int, default=None)
     parser.add_argument('-d', '--debug', type=bool, default=False)
     parser.add_argument('--no_fractures', type=bool, default=True)
+    parser.add_argument('--optimizer', type=str, default='sgd')
 
     args = parser.parse_args()
 
@@ -163,14 +164,31 @@ def main():
         num_classes=3, 
         box_detections_per_img=20,
         pretrained_backbone=True)
-    optimizer   = torch.optim.SGD
+    
+    if args.optimizer == 'adam':
+        optimizer   = torch.optim.Adam
+        optimizer_params = {
+            'lr': args.lr,
+            'weight_decay': args.weight_decay
+        }
+    elif args.optimizer == 'sgd':
+        optimizer   = torch.optim.SGD
+        optimizer_params = {
+            'lr': args.lr,
+            'momentum': args.momentum,
+            'weight_decay': args.weight_decay
+        }
+    else:
+        raise ValueError(f"Optimizer {args.optimizer} not supported")
+
+
     augmentation = DetectionAugmentation(p=0.5)
 
     model       = SuperbDetector(
         backbone, 
         optimizer, 
         augmentation, 
-        optimizer_params={'lr': args.lr},
+        optimizer_params=optimizer_params,
         training_params={'n_epochs': args.n_epochs, 'batch_size': args.batch_size}
         )
     
