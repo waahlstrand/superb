@@ -110,7 +110,7 @@ def main():
     shape           = config["large_shape"] #if not args.resize_shape else args.resize_shape
 
     ds = Superb(
-        Path("/data/balder/datasets/superb/patients"),
+        Path(data_root),
         size=shape,
         removed=removed_samples,
         severity=args.severity,
