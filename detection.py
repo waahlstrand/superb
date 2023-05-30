@@ -67,11 +67,12 @@ def main():
     parser.add_argument('--severity', type=int, default=SEVERITY)
     parser.add_argument('-s', '--resize_shape', nargs='+', type=int, default=None)
     parser.add_argument('-d', '--debug', type=bool, default=False)
+    parser.add_argument('--no_fractures', type=bool, default=True)
 
     args = parser.parse_args()
 
     # Set seed
-    seed_everything(args.seed)   
+    seed_everything(args.seed)
 
     # Human readable time
     name = time.strftime("%Y%m%d-%H%M%S")
@@ -94,7 +95,7 @@ def main():
         loggers = [tb_logger]
 
         model_dir  = tb_logger.log_dir + "/checkpoints"
-        checkpoint = ModelCheckpoint(model_dir, monitor='val_iou', save_top_k=2, mode='min')
+        checkpoint = ModelCheckpoint(model_dir, monitor='val_iou', save_top_k=3, mode='max')
 
         callbacks = [checkpoint]
 
@@ -106,11 +107,11 @@ def main():
 
     data_root       = Path(args.source)
     removed_samples = config["removed"]
-    shape           = config["small_shape"] #if not args.resize_shape else args.resize_shape
+    shape           = config["large_shape"] #if not args.resize_shape else args.resize_shape
 
     ds = Superb(
         Path("/data/balder/datasets/superb/patients"),
-        size=(600, 280),
+        size=shape,
         removed=removed_samples,
         severity=args.severity,
         mode="severity"
@@ -127,8 +128,10 @@ def main():
     # Randomly sample from the majority class
     undersampled_idx = np.random.choice(has_no_fracture, len(has_annotation), replace=False)
 
-    idxs = np.concatenate((has_annotation, undersampled_idx))
-    # idxs = has_annotation
+    if args.no_fractures:
+        idxs = np.concatenate((has_annotation, undersampled_idx))
+    else:
+        idxs = has_annotation
 
     # Split into train and validation
     train_idx, val_idx = train_test_split(idxs, test_size=1-args.train_fraction, random_state=args.seed, shuffle=True)
@@ -160,7 +163,7 @@ def main():
         num_classes=3, 
         box_detections_per_img=20,
         pretrained_backbone=True)
-    optimizer   = torch.optim.Adam
+    optimizer   = torch.optim.SGD
     augmentation = DetectionAugmentation(p=0.5)
 
     model       = SuperbDetector(
