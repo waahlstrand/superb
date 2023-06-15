@@ -8,14 +8,20 @@ import torchvision
 import torchvision.models as models
 from torchvision import transforms as T
 from typing import *
-from models.augmentations import Augmentation, SimSiamAugmentation, SameRandomCrop
+from models.augmentations import Augmentation, SimSiamAugmentation, SameRandomCrop, Patchify
 import torchmetrics
 import matplotlib.pyplot as plt
 import numpy as np
 
 class SimSiam(L.LightningModule):
 
-    def __init__(self, dim: int = 1000, prediction_dim: int = 512, lr: float = 0.05, momentum: float = 0.9, weight_decay: float = 1e-6, n_epochs: int = 100, **kwargs):
+    def __init__(self, 
+                 dim: int = 1000, 
+                 prediction_dim: int = 512, 
+                 lr: float = 0.05, 
+                 momentum: float = 0.9, 
+                 weight_decay: float = 1e-6, 
+                 n_epochs: int = 100, **kwargs):
 
         super().__init__()
         
@@ -51,6 +57,7 @@ class SimSiam(L.LightningModule):
             nn.Linear(prediction_dim, dim)
             )
         
+
         self.criterion = nn.CosineSimilarity(dim=1)
 
     def configure_optimizers(self) -> Any:
@@ -145,14 +152,86 @@ class PatchwiseSimSiam(SimSiam):
 
             self.logger.experiment.add_figure("train_images", f, global_step=self.global_step)
         
-        
-        
-        
         loss = loss.mean()
-
-
 
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         self.log("std_p", std_p1, on_step=True, on_epoch=True, prog_bar=True, logger=True)
 
         return loss
+
+class GridPatchSimSiam(SimSiam):
+
+    def __init__(self, 
+                n_patches: int = 16,
+                image_size: Tuple[int, int] = (256, 256),
+                 dim: int = 1000, 
+                 prediction_dim: int = 512, 
+                 lr: float = 0.05, 
+                 momentum: float = 0.9, 
+                 weight_decay: float = 0.000001, 
+                 n_epochs: int = 100, **kwargs):
+        
+        super().__init__(dim, prediction_dim, lr, momentum, weight_decay, n_epochs, **kwargs)
+
+        self.n_patches = n_patches
+        self.image_size = image_size
+        self.patchify = Patchify.from_n_patches(self.n_patches, self.image_size)
+        self.patch_embeddings = PatchEncoding(n_patches=self.n_patches, dim=dim)
+
+    
+    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
+
+        # Ignore the label
+        x, y = batch
+
+        # Assume batch is twice the actual batch size
+        x1, x2 = torch.split(x, x.shape[0] // 2, dim=0)
+
+        # Make rectangular patches from images
+        x1, pos1 = self.patchify(x1)
+        x2, pos2 = self.patchify(x2)
+
+        pos1 = self.patch_embeddings(pos1.to(x1.device))
+        pos2 = self.patch_embeddings(pos2.to(x2.device))
+        
+        # Augment one of the images
+        # x2 = self.augmentation(x2)
+
+        x1 = x1.float()
+        x2 = x2.float()
+
+        z1 = self.encoder(x1)
+        z2 = self.encoder(x2)
+
+        # Add positional encoding
+        z1 = z1 + pos1
+        z2 = z2 + pos2
+        
+        p1 = self.predictor(z1)
+        p2 = self.predictor(z2)
+
+
+        std_p1 = torch.std(torch.nn.functional.normalize(p1, dim=1), dim=0).mean()
+
+        loss = -(self.criterion(p1, z2.detach()) + self.criterion(p2, z1.detach())) / 2
+
+        loss = loss.mean()
+
+        return loss
+
+
+class PatchEncoding(nn.Module):
+
+    def __init__(self, n_patches: int = 16, dim: int = 1024):
+
+        super().__init__()
+
+        self.n_patches = n_patches
+        self.dim = dim
+
+        self.embedding = nn.Embedding(n_patches, dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+        return self.embedding(x)
+
