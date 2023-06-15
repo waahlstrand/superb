@@ -1,6 +1,6 @@
 __pycache__/
 .ipynb_checkpoints/
-data/
+# data/
 imgs/
 old/
 logs/
@@ -19,6 +19,8 @@ checkpoints/
 *.json
 *.ckpt
 *.yml
+*.ISQ
+*.ISQ:1
 
 # Files
 test.py
