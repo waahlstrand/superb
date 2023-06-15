@@ -9,11 +9,13 @@ import torchvision
 import torchvision.models as models
 from torchvision import transforms as T
 from typing import *
-from models.augmentations import Augmentation, DetectionAugmentation
+from models.augmentations import Augmentation
+from models.augmentation.detection import DetectionAugmentation
 import torchmetrics
 import matplotlib.pyplot as plt
 import numpy as np
 from torchvision.ops import box_iou, generalized_box_iou
+from imgaug.augmentables.bbs import BoundingBox, BoundingBoxesOnImage
 
 class SuperbDetector(L.LightningModule):
 
@@ -50,6 +52,11 @@ class SuperbDetector(L.LightningModule):
         
         outs = self._step(x, y, augment=self.training)
 
+        # Plot some images every 1000 steps
+        # if batch_idx % 1000 == 0:
+        #     for i in range(outs["x"].shape[0]):
+        #         plot_image_with_bbox(outs["x"], outs["y"], i, f"images/train_{batch_idx}_{i}.png")
+
         self.training_step_outputs.append(outs["loss"])
 
         self.log("train_loss", outs["loss"], on_step=True, on_epoch=True, prog_bar=True, logger=True)
@@ -59,16 +66,12 @@ class SuperbDetector(L.LightningModule):
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx) -> STEP_OUTPUT:
 
         x, targets = batch
-        predictions = self.model(x)
+        x = self.augmentation.normalize(x)
 
-        # print(x.shape)
-        # print("predictions", predictions)
-        # print("targets", targets)
-        # print(predictions)
+        predictions = self.model(x)
 
         y_hat_boxes = [y_hat["boxes"] for y_hat in predictions]
         y_boxes = [y["boxes"] for y in targets]
-        # ys = [y["labels"] for y in targets]
 
         # Check all boxes are valid
         ious = []
@@ -109,12 +112,7 @@ class SuperbDetector(L.LightningModule):
         self.validation_step_outputs = []
 
         return {"avg_val_iou": mean_iou}
-    
-    # def test_step(self, batch) -> STEP_OUTPUT:
 
-    #     loss = self._step(*batch, augment=self.training)
-
-    #     return loss
     
     
     def configure_optimizers(self) -> torch.optim.Optimizer:
@@ -127,7 +125,7 @@ class SuperbDetector(L.LightningModule):
         
         # Augment data
         if augment:
-            x = self.augmentation(x)
+            x, y = self.augmentation(x, y)
 
         # Process targets
         targets = [{k: v.to(self.device) for k, v in t.items()} for t in y]
@@ -136,10 +134,21 @@ class SuperbDetector(L.LightningModule):
 
         losses = sum(loss for loss in loss_dict.values())
 
-        return {"loss": losses, "log": loss_dict, "x": x}
+        return {"loss": losses, "log": loss_dict, "x": x, "y": y}
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self.model.eval()
         return self.model(x)
     
 
+def plot_image_with_bbox(x: torch.Tensor, targets: List[Dict[str, torch.Tensor]], idx: int, filename: str = None):
+    
+    x = x.cpu()
+    targets = [{k: v.cpu() for k, v in t.items()} for t in targets]
+
+    boxes = [BoundingBox(*b, label=l.item()) for b, l in zip(targets[idx]["boxes"], targets[idx]["labels"])]
+    bbs = BoundingBoxesOnImage(boxes, shape=x[idx].shape)
+
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+    ax.imshow(bbs.draw_on_image(x[idx].permute(1, 2, 0).numpy()))
+    plt.savefig(filename)

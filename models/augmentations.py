@@ -74,16 +74,26 @@ class Patchify(nn.Module):
         super().__init__()
         self.patch_size = patch_size
 
+    @classmethod
+    def from_n_patches(cls, n_patches: int, image_size: Tuple[int, int] = (256, 256)):
+
+        height = image_size[0] // n_patches
+        width = image_size[1] // n_patches
+
+        return cls(patch_size=(height, width))
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         return self.patchify(x, self.patch_size)
     
     def patchify(self, image: torch.Tensor, patch_size: int) -> torch.Tensor:
+        
+        image = image.squeeze(1)
+        batch_size, height, width = image.shape
+        image       = image.unfold(1, *patch_size).unfold(2, *patch_size).reshape(-1, 1, *patch_size).repeat(1, 3, 1, 1)
+        positions   = torch.arange(image.shape[0] // batch_size).repeat(2, 1).reshape(-1,1)
 
-        batch_size, channels, height, width = image.shape
-        image   = image.unfold(2, *patch_size).unfold(3, *patch_size).reshape(batch_size, -1, *patch_size)
-
-        return image
+        return image, positions
 
 class Normalize(nn.Module):
 

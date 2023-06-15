@@ -19,7 +19,8 @@ from sklearn.model_selection import StratifiedShuffleSplit, train_test_split
 from torchvision import models
 
 
-from models.augmentations import Augmentation, DetectionAugmentation
+from models.augmentations import Augmentation
+from models.augmentation.detection import DetectionAugmentation
 from models.detection import SuperbDetector
 from data.superb import Superb, collate_with_bboxes
 
@@ -115,7 +116,8 @@ def main():
         size=shape,
         removed=removed_samples,
         severity=args.severity,
-        mode="severity"
+        mode="severity",
+        dtype=np.uint8
     )
 
     has_fracture = [i for i, p in enumerate(ds) if any([v for v in p.vertebrae if ds.compression(v)])]
@@ -181,8 +183,9 @@ def main():
     else:
         raise ValueError(f"Optimizer {args.optimizer} not supported")
 
-
-    augmentation = DetectionAugmentation(p=0.5)
+    p_augmentation = 0.2
+    p_dropout = 0.2
+    augmentation = DetectionAugmentation(p=p_augmentation, size_percent=(0.02, 0.02), p_dropout=p_dropout)
 
     model       = SuperbDetector(
         backbone, 

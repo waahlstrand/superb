@@ -18,6 +18,7 @@ class Superb(Dataset):
                  size: Tuple[float, float] = (600, 280),
                  patient_dirs: List[Path] = [],
                  severity: int = 0,
+                 bbox_expansion: float = 0.1,
                  mode: str = "exists"
                  ) -> None:
         super().__init__()
@@ -32,6 +33,7 @@ class Superb(Dataset):
         self.dtype = dtype
         self.mode = mode
         self.height, self.width = size
+        self.bbox_expansion = bbox_expansion
 
         self.compression = Compression(severity, mode)
 
@@ -113,7 +115,7 @@ def collate_with_bboxes(ds: Superb, batch: List[Patient]) -> Tuple[np.ndarray, n
         for v in patient.vertebrae:
             if ds.compression(v) and v.coordinates is not None:
                 box = v.coordinates.to_bbox(patient.spine.image.height, patient.spine.image.width).resize(ds.height, ds.width)
-                box = clip_boxes_to_image(box_convert(torch.tensor(box.to_expanded().to_numpy()), "xywh", "xyxy"), (ds.height, ds.width))
+                box = clip_boxes_to_image(box_convert(torch.tensor(box.to_expanded(ds.bbox_expansion).to_numpy()), "xywh", "xyxy"), (ds.height, ds.width))
                 bs.append(torch.tensor(box))
         boxes.append(bs)
     # print(boxes)
@@ -162,7 +164,8 @@ class RSNA(Dataset):
         image       = torch.from_numpy(image).float() / 255
 
         # Repeat channels
-        image       = image.repeat(3, 1, 1)
+        # image       = image.repeat(3, 1, 1)
+        image = image.unsqueeze(0)
 
         # Resize
         image       = self.resize(image)
