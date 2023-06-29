@@ -1,4 +1,4 @@
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 import torchvision.transforms as T
 from torchvision.ops import box_convert, clip_boxes_to_image
 import torch
@@ -45,6 +45,11 @@ class Superb(Dataset):
             patient_dir = self.patient_dirs[index]
     
             return Patient.from_moid(patient_dir.name, self.patients_root)
+    
+    def __iter__(self) -> Iterator[Patient]:
+
+        for patient_dir in self.patient_dirs:
+            yield Patient.from_moid(patient_dir.name, self.patients_root)
     
     def get_patient(self, moid: str) -> Patient:
         return Patient.from_moid(moid, self.patients_root)
@@ -137,6 +142,62 @@ def collate_with_bboxes(ds: Superb, batch: List[Patient]) -> Tuple[np.ndarray, n
                   ]
     
     return images, targets
+
+
+class Vertebrae(Dataset):
+
+    def __init__(self, 
+                 patients_root: Path,
+                 removed: List[str] = [],
+                 dtype: np.dtype = np.float32,
+                 size: Tuple[float, float] = (600, 280),
+                 patient_dirs: List[Path] = [],
+                 severity: int = 0,
+                 bbox_expansion: float = 0.1,
+                 mode: str = "exists"
+                 ) -> None:
+        super().__init__()
+
+        self.patients_root = patients_root
+        self.removed = removed
+        self.patient_dirs = [
+            patient_dir for patient_dir in patients_root.glob("*") \
+                if patient_dir.is_dir() and (patient_dir.name not in self.removed)] \
+                    if not patient_dirs else patient_dirs
+        
+        self.patients = [Patient.from_moid(patient_dir.name, self.patients_root) for patient_dir in self.patient_dirs]
+        
+        self.vertebrae = [(patient, v) for patient in self.patients for v in patient.vertebrae if v.coordinates is not None]
+
+
+        self.dtype = dtype
+        self.mode = mode
+        self.height, self.width = size
+        self.bbox_expansion = bbox_expansion
+
+        self.compression = Compression(severity, mode)
+
+    def __len__(self) -> int:
+        return len(self.vertebrae)
+    
+    def __getitem__(self, index) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        p, v = self.vertebrae[index]
+
+        coordinates = v.coordinates.to_bbox(*p.spine.size).to_xcycwh()
+
+        # Centre coordinates
+        centre = coordinates[:2]
+        image = p.spine.crop(v.coordinates.to_bbox(*p.spine.size).to_expanded(0.4))
+
+        image = torch.Tensor(image)
+        centre = torch.Tensor(centre)
+        label = torch.tensor(self.compression(v)-1, dtype=torch.int64)
+
+        return image, centre, label
+
+
+
 
 class RSNA(Dataset):
 
