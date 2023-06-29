@@ -4,9 +4,13 @@ import numpy as np
 from pathlib import Path
 from PIL import Image
 import json
-from utils.structure import transform_coordinates_from_pdf_to_image
+# from utils.structure import transform_coordinates_from_pdf_to_image
 from models.augmentations import Preprocess
-import pydicom
+from torchvision.transforms.functional import crop
+from imgaug.augmentables.bbs import BoundingBox, BoundingBoxesOnImage
+from torchvision.ops import box_convert, clip_boxes_to_image
+import matplotlib.pyplot as plt
+import torch
 
 THORACIC = [
     "T12", "T11", "T10", "T9", "T8", "T7", "T6", "T5", "T4"
@@ -33,9 +37,17 @@ class DXA:
     def image(self) -> Image:
         return Image.open(self.path)
     
+    @property
+    def size(self) -> Tuple[int, int]:
+        return self.image.size
+    
     def to_numpy(self, height: float = 600, width: float = 280, dtype = np.float32) -> np.ndarray:
         preprocess = Preprocess((height, width), dtype=dtype)
         return preprocess(str(self.path))
+    
+    def crop(self, bbox: "Bbox") -> np.ndarray:
+        return crop(self.image, bbox.y, bbox.x, bbox.height, bbox.width)
+
     
 @dataclass
 class CT:
@@ -65,9 +77,6 @@ class Point:
 @dataclass
 class Annotation:
     points: List[Point]
-
-    # def __post_init__(self):
-    #     assert len(self.points) == 6, "VFA must have 6 points"
 
     def to_numpy(self) -> np.ndarray:
         return np.array([p.to_numpy() for p in self.points])
@@ -178,10 +187,6 @@ class Vertebra:
     kommentar: str
     coordinates: Optional[Annotation] = None
 
-    @property
-    def bbox(self) -> Bbox:
-        return Bbox.from_annotation(self.coordinates)
-
     
 @dataclass
 class Vertebrae:
@@ -217,8 +222,7 @@ class Vertebrae:
     pixel_spacing: Tuple[float, float]
     height: int
     width: int
-    coord_height: Optional[int] = None
-    coord_width: Optional[int] = None
+    annotations: List[Annotation]
 
     def __iter__(self) -> Iterator[Vertebra]:
         for vertebra in VERTEBRA_NAMES:
@@ -234,19 +238,10 @@ class Vertebrae:
 
             coords = data[vertebra].get("coordinates", None)
             if coords is not None:
-                transformed = transform_coordinates_from_pdf_to_image(
-                    coords,
-                    data["height"],
-                    data["width"],
-                    data["coord_height"],
-                    data["coord_width"]
-                )
-                
+                transformed = coords
                 try:
                     annotation = Annotation([Point(*p) for p in transformed])
                 except Exception as e:
-                    print(e)
-                    print(data)
                     annotation = None
             else:
                 annotation = None
@@ -260,6 +255,12 @@ class Vertebrae:
                 data[vertebra]["KOMMENTAR"],
                 annotation
             )
+
+        annotations = []
+        if data.get("keypoints") is not None:
+            for v in data["keypoints"]:
+                points = [Point(*p) for p in v]
+                annotations.append(Annotation(points))
 
         other = {
             "ULL": data["ULL"],
@@ -281,9 +282,10 @@ class Vertebrae:
             "pixel_spacing": tuple(data["pixel_spacing"]),
             "height": data.get("height", None),
             "width": data.get("width", None),
-            "coord_height": data.get("coord_height", None),
-            "coord_width": data.get("coord_width", None)
+            "annotations": annotations
         }
+        
+        # print(other)
 
         
         return Vertebrae(**vertebrae, **other)
@@ -315,8 +317,8 @@ class Patient:
         try:
             vertebrae = Vertebrae.from_json(label_path)
         except Exception as e:
-            print(moid)
             raise e
+            vertebrae = None
 
         
         return Patient(
@@ -365,3 +367,42 @@ class Compression:
             return grad_visuell
         else:
             raise ValueError(f"Unknown compression mode: {self.mode}")
+        
+def patient_to_image_bbox(patient: Patient, height: int, width: int, bbox_expansion: float = 0.1) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+
+    bboxes = []
+    for v in patient.vertebrae:
+        if v.coordinates is not None:
+
+            # Get label
+            label = v.name
+            compression = v.grad_visuell
+
+            bbox = v.coordinates.to_bbox(patient.spine.image.height, patient.spine.image.width).resize(height, width)
+            bbox = clip_boxes_to_image(box_convert(torch.Tensor(bbox.to_expanded(bbox_expansion).to_numpy()), "xywh", "xyxy"), (height, width))
+            bboxes.append(
+                {
+                    "label": label,
+                    "compression": compression,
+                    "bbox": np.array(bbox)
+                }
+            )
+
+    image = patient.spine.to_numpy(height, width, dtype=np.uint8)
+
+    return image, bboxes
+
+
+def plot_image_with_points(x: np.ndarray, targets: List[Dict[str, Any]]):
+    pass
+    
+def plot_image_with_bbox(x: np.ndarray, targets: List[Dict[str, Any]]):
+
+
+    boxes = [BoundingBox(*t["bbox"], label=f"{t['label']}: {int(t['compression'])}") for t in targets]
+    bbs = BoundingBoxesOnImage(boxes, shape=x.shape)
+
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+    ax.imshow(bbs.draw_on_image(np.transpose(x, (1, 2, 0))), )
+
+    return fig, ax

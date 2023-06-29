@@ -168,8 +168,8 @@ def image_id_to_excel_id(id: str) -> str:
     else:
         return id
     
-def pdf_name_to_moid(pdf_name: Path):
-    file_moid = "MO"+pdf_name.name.removesuffix(".pdf").split("MO")[-1].zfill(4)
+def doc_name_to_moid(pdf_name: Path, suffix=".docx"):
+    file_moid = "MO"+pdf_name.name.removesuffix(suffix).split("MO")[-1].zfill(4)
     
     # Split and remove e.g. "_LJ, _Revert, _1"
     file_moid = file_moid.split("_")[0]
@@ -184,6 +184,11 @@ def pdf_name_to_moid(pdf_name: Path):
         moid = file_moid
 
     return moid
+    
+def pdf_name_to_moid(pdf_name: Path):
+    
+    return doc_name_to_moid(pdf_name, suffix=".pdf")
+
     
 has_grad_morf = lambda x: x["GRAD_MORF"] != 0
 has_vertebra_with_grad_morf = lambda x: any([x[vertebra]["GRAD_MORF"] != 0 for vertebra in VERTEBRA_NAMES])

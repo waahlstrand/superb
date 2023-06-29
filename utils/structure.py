@@ -1,20 +1,19 @@
 #%%
 import os
-from glob import glob
 from tqdm import tqdm
-from lxml import etree
 from typing import *
 import numpy as np
 import pydicom
-from utils.xml_to_dict import XmlDictConfig
 import utils.labels as labelling
 import shutil
 from pathlib import Path
 from PIL import Image
 import pandas as pd
 import json 
-from utils.parse import parse_annotation_pdf, vertebrae_from_points
 import itk
+import cv2
+from utils.extract import Extractor, Mode
+from itertools import product
 
 ANNOTATION_TAG = (0x0021, 0x1001)
 PATIENT_TAG = (0x0010, 0x0020)
@@ -41,41 +40,28 @@ def threshold(img: np.ndarray, window_width: float, window_level: float) -> np.n
 
     return image
 
-def transform_coordinates_from_pdf_to_image(
-        coords: List[List[float]], 
-        true_height: int, 
-        true_width: int, 
-        coord_height: int, 
-        coord_width: int) -> List[List[float]]:
-    """
-    Transform coordinates from PDF to image coordinates.
-    """
-    # Scale the coordinates
-    coords = [[x * true_width / coord_width, y * true_height / coord_height] for y, x in coords]
 
-    # Flip the coordinates
-    # coords = [[x, true_height - y] for x, y in coords]
-
-    return coords
-
-
-def get_patient_pdfs(path: Path) -> Dict[str, Union[Path, None]]:
+def get_patient_vfa_document(path: Path) -> Dict[str, Union[Path, None]]:
 
     pdfs = list(path.rglob("*.pdf"))
+    word_docs = list(path.rglob("*.docx"))
+    files = pdfs + word_docs
 
-    patient_pdfs = {}
-    for pdf in pdfs:
-        moid = labelling.pdf_name_to_moid(pdf)
-        patient_pdfs.update({moid: pdf})
+    patient_docs = {}
+    for file in files:
+        moid = labelling.doc_name_to_moid(file, suffix=file.suffix)
+        patient_docs.update({moid: file})
 
-    return patient_pdfs
+    return patient_docs
 
 
 def build_patient_directory_tree(
         dcm_root: Path, 
-        pdf_root: Path,
+        vfa_document_root: Path,
         labels_path: Path, 
-        target_root: Path):
+        target_root: Path,
+        file_directory: Path = Path("./images")
+        ):
     """
     Build a directory tree for the patient data.
     
@@ -99,11 +85,15 @@ def build_patient_directory_tree(
 
     files   = list(dcm_root.glob("*.dcm"))
     labels  = pd.read_excel(labels_path)
-    pdfs    = get_patient_pdfs(pdf_root)
+    vfas    = get_patient_vfa_document(vfa_document_root)
 
     is_vfa_dicom = lambda x: x[PIXEL_SPACING_TAG].value is not None
-    has_pdf_annotation = lambda x: x in pdfs.keys()
+    has_vfa_annotation = lambda x: x in vfas.keys()
     has_full_annotation = lambda vertebrae, names: len(vertebrae) == len(names)
+
+    degrees = [3, 4, 5]
+    thresholds = [10, 11, 12, 13, 14, 15]
+    products = list(product(degrees, thresholds))
 
     # Group files by patient
     lacks_vfa = []
@@ -183,44 +173,71 @@ def build_patient_directory_tree(
                 })
 
             # Get the annotation from the PDF
-            if has_pdf_annotation(patient_id):
+            if has_vfa_annotation(patient_id):
 
-                pdf = pdfs[patient_id]
+                document = vfas[patient_id]
 
-                # Get the annotation from the PDF
+                # Get new document file name
+                new_document_file = report_file_dir / (patient_id + document.suffix)
+
+                # Save the document
+                shutil.copy(document, new_document_file)
+
+                template = cv2.imread(str(new_image_file), cv2.IMREAD_GRAYSCALE)
+
                 try:
-                    annotation, coord_width, coord_height, names = parse_annotation_pdf(pdf)
+                    extractor = Extractor(document, template, file_directory)
                 except Exception as e:
-                    errors.append({"patient_id": patient_id, "error": str(e)})
-                    print(e, pdf)
+                    errors.append((patient_id, file, e))
                     continue
+                
+                # Some heuristics to get the right degree and threshold for certain patients
+                if int(patient_id.removeprefix("MO")) > 369 and extractor.mode == Mode.WORD:
+                    size_factor = 0.921
+                    degree = 5
+                    threshold = 10
+                else:
+                    size_factor = 0.9
+                    degree = 5
+                    threshold = 10
 
-                # Get the vertebrae from the annotation
-                vertebrae = vertebrae_from_points(
-                    annotation, 
-                    names,
-                    n_points_in_vertebra=6, 
-                    n_neighbours=8, 
-                    area_threshold=3000, 
-                    rectangularity_threshold=.5, 
-                    height_width_ratio_threshold=0.85)
+                vertebrae = np.array([])
 
-                # Add the vertebrae to the label
-                if has_full_annotation(vertebrae, names):
-                    for name in names:
-                        if name in vertebrae.keys():
-                            label[name].update({"coordinates": vertebrae[name]})
-                        else:
-                            try:
-                                label.update({name: {"coordinates": vertebrae[name]}})
-                            except KeyError:
+                # Run a grid search over the degrees and thresholds
+                # to find the first combination that works
+                for degree, threshold in products:
+                    progress.set_description(f"{patient_id}, threshold {threshold}, degree {degree}")
 
-                                raise KeyError
+                    try:
+                        vertebrae, names = extractor.vertebrae(degree=degree, residual_threshold=threshold, size_factor=size_factor)
+                    except ValueError as e:
+                        continue
+                    except Exception as e:
+                        errors.append((patient_id, file, e))
+                        continue
+                    else:
+                        break
 
-                    label.update({
-                        "coord_height": coord_height,
-                        "coord_width": coord_width,
+                if len(vertebrae) == 0:
+                    errors.append((patient_id, file, "No vertebrae extracted."))
+
+                
+                # If we have names and coordinates, add both
+                if names is not None and len(names) == len(vertebrae):
+                    for name, vertebra in zip(names, vertebrae):
+                        label[name].update({
+                            "coordinates": vertebra.tolist(),
                         })
+
+                # If we have all vertebrae, we already know the names
+                elif len(vertebrae) > len(labelling.VERTEBRA_NAMES):
+                    for name, vertebra in zip(labelling.VERTEBRA_NAMES[::-1], vertebrae):
+                        label[name].update({
+                            "coordinates": vertebra.tolist(),
+                        })
+                
+                # If we have coordinates but no names, add only coordinates
+                label.update({"keypoints": vertebrae.tolist()})
 
             with open(new_label_file, "w+") as f:
                 json.dump(label, f, indent=4)
@@ -243,7 +260,6 @@ def build_patient_directory_tree(
 
     return patient_has_vfa, not_in_excel, errors
 
-
 def group_cts(root: Path):
 
     cts = list(root.rglob("*.ISQ:1"))
@@ -262,5 +278,3 @@ def group_cts(root: Path):
 
         patients[patient_id].append(ct)
 
-
-# %%
