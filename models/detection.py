@@ -140,15 +140,3 @@ class SuperbDetector(L.LightningModule):
         self.model.eval()
         return self.model(x)
     
-
-def plot_image_with_bbox(x: torch.Tensor, targets: List[Dict[str, torch.Tensor]], idx: int, filename: str = None):
-    
-    x = x.cpu()
-    targets = [{k: v.cpu() for k, v in t.items()} for t in targets]
-
-    boxes = [BoundingBox(*b, label=l.item()) for b, l in zip(targets[idx]["boxes"], targets[idx]["labels"])]
-    bbs = BoundingBoxesOnImage(boxes, shape=x[idx].shape)
-
-    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
-    ax.imshow(bbs.draw_on_image(x[idx].permute(1, 2, 0).numpy()))
-    plt.savefig(filename)
