@@ -1,7 +1,5 @@
-from slask.new import SuperbModel, SimSiam, PatchwiseSimSiam
+from models.contrastive import GridPatchSimSiam, SimSiam
 from data.superb import RSNA
-from models.augmentations import Augmentation
-from slask.superb import BinaryDataset
 from torch.utils.data import Subset, DataLoader
 import pytorch_lightning as L
 import matplotlib.pyplot as plt
@@ -120,7 +118,7 @@ def main():
     if not args.patchwise:
         model = SimSiam()
     else:
-        model = PatchwiseSimSiam(size=(128, 128), p=1.0, expansion_factor=0.5)
+        model = GridPatchSimSiam(n_patches=3, image_size=(512, 512))
 
     # Set up trainer
     trainer = L.Trainer(
@@ -132,28 +130,28 @@ def main():
     # Train
     trainer.fit(model, dataloader)
 
-    # Test with knn classifier
-    rsna_data = RSNA(data_root, labels_path, size=(512, 512))
-    # Get features
-    features = []
-    labels = []
-    for i, (x, y) in tqdm(enumerate(rsna_data), total=len(rsna_data)):
-        features.append(model.encoder(x.unsqueeze(0)).detach().cpu().numpy())
-        labels.append(y)
+    # # Test with knn classifier
+    # rsna_data = RSNA(data_root, labels_path, size=(512, 512))
+    # # Get features
+    # features = []
+    # labels = []
+    # for i, (x, y) in tqdm(enumerate(rsna_data), total=len(rsna_data)):
+    #     features.append(model.encoder(x.unsqueeze(0)).detach().cpu().numpy())
+    #     labels.append(y)
 
-    features = np.concatenate(features, axis=0)
-    labels = np.array(labels)
+    # features = np.concatenate(features, axis=0)
+    # labels = np.array(labels)
 
-    # Split into train and test
-    train_idxs, test_idxs = train_test_split(np.arange(len(labels)), train_size=0.85, stratify=labels)
+    # # Split into train and test
+    # train_idxs, test_idxs = train_test_split(np.arange(len(labels)), train_size=0.85, stratify=labels)
 
-    # Train knn
-    knn = KNeighborsClassifier(n_neighbors=5)
-    knn.fit(features[train_idxs], labels[train_idxs])
+    # # Train knn
+    # knn = KNeighborsClassifier(n_neighbors=5)
+    # knn.fit(features[train_idxs], labels[train_idxs])
 
-    # Test knn
-    acc = knn.score(features[test_idxs], labels[test_idxs])
-    print(f"Accuracy: {acc}")
+    # # Test knn
+    # acc = knn.score(features[test_idxs], labels[test_idxs])
+    # print(f"Accuracy: {acc}")
 
 
 
