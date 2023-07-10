@@ -13,6 +13,34 @@ from models.augmentations import Augmentation, SimSiamAugmentation, SameRandomCr
 import torchmetrics
 import matplotlib.pyplot as plt
 import numpy as np
+from torchvision.models import resnet18
+
+
+class ConvolutionalRegression(nn.Module):
+
+    def __init__(self, n_coords=6, n_dim=2, pretrained_backbone=False, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+        self.n_coords = n_coords
+        self.n_dim = n_dim
+        self.pretrained_backbone = pretrained_backbone
+
+        self.resnet = resnet18(pretrained=self.pretrained_backbone)
+
+        self.resnet.fc = nn.Linear(512, self.n_coords * self.n_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+        # (B, C, H, W) -> (B, C, n_coords * n_dim)
+        x = self.resnet(x)
+
+        # (B, C, n_coords * n_dim) -> (B, n_coords, n_dim)
+        x = x.view(-1, self.n_coords, self.n_dim)
+
+        return x
+
+
+        
 
 class SuperbModel(L.LightningModule):
 

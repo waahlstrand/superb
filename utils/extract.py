@@ -26,6 +26,20 @@ def transform_coordinates_from_document_to_image(
 
     return coords
 
+def resize_coordinates(
+        coords: List[List[float]],
+        new_height: int,
+        new_width: int,
+        old_height: int,
+        old_width: int) -> List[List[float]]:
+    
+    return transform_coordinates_from_document_to_image(
+        coords, 
+        new_height, 
+        new_width, 
+        old_height, 
+        old_width
+    )
 
 class Mode(Enum):
     PDF = 1

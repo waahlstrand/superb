@@ -5,6 +5,7 @@ from pathlib import Path
 from PIL import Image
 import json
 # from utils.structure import transform_coordinates_from_pdf_to_image
+from utils.extract import resize_coordinates
 from models.augmentations import Preprocess
 from torchvision.transforms.functional import crop
 from imgaug.augmentables.bbs import BoundingBox, BoundingBoxesOnImage
@@ -41,9 +42,8 @@ class DXA:
     def size(self) -> Tuple[int, int]:
         return self.image.size
     
-    def to_numpy(self, height: float = 600, width: float = 280, dtype = np.float32) -> np.ndarray:
-        preprocess = Preprocess((height, width), dtype=dtype)
-        return preprocess(str(self.path))
+    def to_numpy(self) -> np.ndarray:
+        return np.array(self.image)
     
     def crop(self, bbox: "Bbox") -> np.ndarray:
         return crop(self.image, bbox.y, bbox.x, bbox.height, bbox.width)
@@ -70,19 +70,47 @@ class Point:
 
     x: float
     y: float
+    visible: int = 1
 
     def to_numpy(self) -> np.ndarray:
-        return np.array([self.x, self.y])
+        return np.array([self.x, self.y, self.visible])
 
 @dataclass
 class Annotation:
     points: List[Point]
+    image_height: Optional[float] = None
+    image_width: Optional[float] = None
 
     def to_numpy(self) -> np.ndarray:
         return np.array([p.to_numpy() for p in self.points])
     
     def to_bbox(self, image_height: float, image_width: float) -> "Bbox":
         return Bbox.from_annotation(self, image_height, image_width)
+    
+    @property
+    def posterior(self) -> List[Point]:
+        return self.points[0:2]
+    
+    @property
+    def middle(self) -> List[Point]:
+        return self.points[2:4]
+    
+    @property
+    def anterior(self) -> List[Point]:
+        return self.points[4:6]
+    
+    @property
+    def centroid(self) -> Point:
+        return Point(np.mean([p.x for p in self.points]), np.mean([p.y for p in self.points]))
+    
+    def set_size(self, image_height: float, image_width: float) -> "Annotation":
+        self.image_height = image_height
+        self.image_width = image_width
+
+        return self
+    
+    def resize(self, new_img_height: float, new_img_width: float):
+        return Annotation([Point(p.x * new_img_width / self.image_width, p.y * new_img_height / self.image_height, p.visible) for p in self.points], new_img_height, new_img_width)
 
 @dataclass
 class Bbox:
@@ -309,17 +337,13 @@ class Patient:
     @staticmethod
     def from_moid(moid: str, root: Path) -> "Patient":
         patient_dir = root / moid
-        spine_path  = patient_dir / "lateral" / (moid + ".tiff")
-        label_path  = patient_dir / "lateral" / (moid + ".json")
+        spine_path  = patient_dir / "lateral" / "patient.tiff"
+        label_path  = patient_dir / "lateral" / "patient.json"
         dxa = DXA(spine_path)
         leg = None
         arm = None
-        try:
-            vertebrae = Vertebrae.from_json(label_path)
-        except Exception as e:
-            raise e
-            vertebrae = None
 
+        vertebrae= Vertebrae.from_json(label_path) if label_path.exists() else None
         
         return Patient(
             moid, 

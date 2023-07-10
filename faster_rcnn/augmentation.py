@@ -1,9 +1,7 @@
-from typing import Any
 import imgaug as ia
 from imgaug import augmenters as iaa
 import torch
 from typing import *
-import numpy as np
 
 class Normalize:
 

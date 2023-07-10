@@ -4,20 +4,14 @@ import pytorch_lightning as L
 from pytorch_lightning.utilities.types import STEP_OUTPUT
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torchvision
-import torchvision.models as models
-from torchvision import transforms as T
+
 from typing import *
-from models.augmentations import Augmentation
-from models.augmentation.detection import DetectionAugmentation
-# import torchmetrics
+from faster_rcnn.augmentation import DetectionAugmentation
 import matplotlib.pyplot as plt
 import numpy as np
-from torchvision.ops import box_iou, generalized_box_iou
-from imgaug.augmentables.bbs import BoundingBox, BoundingBoxesOnImage
+from torchvision.ops import box_iou
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
-# from torchmetrics import MetricCollection
+from torchmetrics import Accuracy, Precision, Recall
 
 def plot_image(x, targets, predictions):
 
@@ -76,7 +70,13 @@ class SuperbDetector(L.LightningModule):
         self.training_params = training_params
         self.augmentation = augmentation
 
-        self.map = MeanAveragePrecision(num_classes=4)
+        self.map = MeanAveragePrecision(num_classes=4, class_metrics=True)
+
+        # self.label_metrics = {
+        #     "accuracy": Accuracy(num_classes=4, task="multiclass"),
+        #     "precision": Precision(num_classes=4, task="multiclass"),
+        #     "recall": Recall(num_classes=4, task="multiclass")
+        # }
 
         self.labels = labels
 
@@ -105,7 +105,7 @@ class SuperbDetector(L.LightningModule):
             f, ax = plot_image(outs["x"][0], outs["y"][0], outs["y"][0])
             self.logger.experiment.add_figure("training examples", f, self.current_epoch)
 
-        self.log("train_loss", outs["loss"].detach(), on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log("train_loss", outs["loss"].detach(), on_step=True, on_epoch=True, prog_bar=True, logger=True, batch_size=self.training_params["batch_size"])
 
         return outs
     
@@ -121,7 +121,7 @@ class SuperbDetector(L.LightningModule):
         mean_average_precision = self.map.compute()
 
         self.map.reset()
-        
+
         # Plot image
         if batch_idx == 0:
             # Print to log
@@ -130,7 +130,10 @@ class SuperbDetector(L.LightningModule):
             f, ax = plot_image(x[0], targets[0], predictions[0])
             self.logger.experiment.add_figure("predictions", f, self.current_epoch)
 
-        self.log("val_map", mean_average_precision["map"], on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log("val_map", mean_average_precision["map"], on_step=True, on_epoch=True, prog_bar=True, logger=True, batch_size=self.training_params["batch_size"])
+
+        for i, map_per_class in enumerate(mean_average_precision["map_per_class"]):
+            self.log(f"val_map_{i}", map_per_class, on_step=True, on_epoch=True, prog_bar=False, logger=True, batch_size=self.training_params["batch_size"])
 
         self.validation_step_outputs.append(
             {
@@ -154,7 +157,7 @@ class SuperbDetector(L.LightningModule):
 
         self.map.reset()
 
-        self.log("val_map", mean_average_precision["map"], on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.log("val_map", mean_average_precision["map"], on_step=False, on_epoch=True, prog_bar=True, logger=True, batch_size=self.training_params["batch_size"])
 
         # Reset outputs
         self.validation_step_outputs = []

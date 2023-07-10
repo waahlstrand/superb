@@ -97,7 +97,7 @@ def build_patient_directory_tree(
 
     # Group files by patient
     lacks_vfa = []
-    errors = []
+    errors = set()
 
     # Get labels
     labels = labelling.excel_to_dict(labels)
@@ -139,13 +139,13 @@ def build_patient_directory_tree(
             has_vfa = True
 
             # Create a renamed dicom file
-            new_dcm_file    = lateral_file_dir / (patient_id + ".dcm")
+            new_dcm_file    = lateral_file_dir / "patient.dcm"
 
             # Download the image as an easy access tiff
-            new_image_file  = lateral_file_dir / (patient_id + ".tiff")
+            new_image_file  = lateral_file_dir / "patient.tiff"
 
             # Get the label for the image
-            new_label_file  = lateral_file_dir / (patient_id + ".json")
+            new_label_file  = lateral_file_dir / "patient.json"
 
             # Save all the files
             ## Save the dicom file
@@ -178,7 +178,7 @@ def build_patient_directory_tree(
                 document = vfas[patient_id]
 
                 # Get new document file name
-                new_document_file = report_file_dir / (patient_id + document.suffix)
+                new_document_file = report_file_dir / ("patient" + document.suffix)
 
                 # Save the document
                 shutil.copy(document, new_document_file)
@@ -188,7 +188,7 @@ def build_patient_directory_tree(
                 try:
                     extractor = Extractor(document, template, file_directory)
                 except Exception as e:
-                    errors.append((patient_id, file, e))
+                    errors.add((patient_id, file, e))
                     continue
                 
                 # Some heuristics to get the right degree and threshold for certain patients
@@ -205,6 +205,7 @@ def build_patient_directory_tree(
 
                 # Run a grid search over the degrees and thresholds
                 # to find the first combination that works
+                names = None
                 for degree, threshold in products:
                     progress.set_description(f"{patient_id}, threshold {threshold}, degree {degree}")
 
@@ -213,13 +214,13 @@ def build_patient_directory_tree(
                     except ValueError as e:
                         continue
                     except Exception as e:
-                        errors.append((patient_id, file, e))
+                        errors.add((patient_id, file, e))
                         continue
                     else:
                         break
 
                 if len(vertebrae) == 0:
-                    errors.append((patient_id, file, "No vertebrae extracted."))
+                    errors.add((patient_id, file, "No vertebrae extracted."))
 
                 
                 # If we have names and coordinates, add both
@@ -230,7 +231,7 @@ def build_patient_directory_tree(
                         })
 
                 # If we have all vertebrae, we already know the names
-                elif len(vertebrae) > len(labelling.VERTEBRA_NAMES):
+                elif len(vertebrae) == len(labelling.VERTEBRA_NAMES):
                     for name, vertebra in zip(labelling.VERTEBRA_NAMES[::-1], vertebrae):
                         label[name].update({
                             "coordinates": vertebra.tolist(),

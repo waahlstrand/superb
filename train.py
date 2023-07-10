@@ -1,246 +1,221 @@
-from models import CustomSuperbBackbone
-from models.augmentations import Augmenter
-from slask.superb import BinaryDataset, CategoricalDataset
-from torch.utils.data import Subset, DataLoader, WeightedRandomSampler
-import matplotlib.pyplot as plt
-import numpy as np
-import torch
-from torch import nn
-from pathlib import Path
-from sklearn.model_selection import StratifiedShuffleSplit
-from torchvision import models
 import json
 import argparse
 import warnings
-import time
-import matplotlib
-import utils.labels as labelling
+from pathlib import Path
 
-matplotlib.use('Agg')
+import pandas as pd
+
+import torch
+import torchvision
+from pytorch_lightning import seed_everything
+from pytorch_lightning.loggers import TensorBoardLogger, CSVLogger
+from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning import Trainer
+
+from data.superb import SuperbDataModule
+
+from faster_rcnn.models import SuperbDetector
+from faster_rcnn.augmentation import DetectionAugmentation
+# from detr.models import SuberbDetr
 
 warnings.filterwarnings("ignore")
 
+
 def main():
+    parser = argparse.ArgumentParser(description="Train a SUPERB model")
+    parser.add_argument("--source", type=str, default="")
+    parser.add_argument("--cfg", type=str, default="")
+
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", type=str, default=0)
+    parser.add_argument("--log_dir", type=str, default="./logs")
+    parser.add_argument("--name", type=str, default="superb")
+    parser.add_argument("-d", "--debug", type=bool, default=False)
+    parser.add_argument("--target", type=str, default="keypoint")
+
+    # Training parameters
+    parser.add_argument("--backbone", type=str, default="faster-rcnn")
+    parser.add_argument("--optimizer", type=str, default="sgd")
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--n_epochs", type=int, default=500)
+    parser.add_argument("--n_workers", type=int, default=24)
+    parser.add_argument("--train_fraction", type=int, default=0.85)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--momentum", type=float, default=0.9)
+    parser.add_argument("--weight_decay", type=float, default=5e-4)
+    parser.add_argument("--height", type=int, default=600)
+    parser.add_argument("--width", type=int, default=280)
+    parser.add_argument("--bbox_expansion", type=float, default=0.1)
+    parser.add_argument("--bbox_format", type=str, default="xyxy")
+    parser.add_argument("--n_classes", type=int, default=4)
+    parser.add_argument("--n_keypoints", type=int, default=6)
+    parser.add_argument("--p_dropout", type=float, default=0.2)
+    parser.add_argument("--p_augmentation", type=float, default=0.5)
+    parser.add_argument("--p_crop", type=float, default=0.2)
+
+    parser.add_argument("--checkpoint", type=str, default="")
+
+    # Get arguments
+    args = parser.parse_args()
+
+    training_params = {
+                'n_epochs': args.n_epochs,
+                'batch_size': args.batch_size,
+                'n_workers': args.n_workers,
+                'train_fraction': args.train_fraction,
+                'height': args.height,
+                'width': args.width,
+                'p_dropout': args.p_dropout,
+                'p_augmentation': args.p_augmentation,
+                'p_crop': args.p_crop
+            }
+
+    # Set seed
+    seed_everything(args.seed)
+
+    if not Path(args.log_dir).exists():
+        Path(args.log_dir).mkdir(parents=True, exist_ok=True)
+
+    # Handle logging
+    if not args.debug:
+        tb_logger = TensorBoardLogger(args.log_dir, name=args.name)
+        csv_logger = CSVLogger(args.log_dir, name=args.name, version=tb_logger.version)
+
+        loggers = [tb_logger, csv_logger]
+
+        # Handle checkpointing
+        checkpoint_callbacks = [ModelCheckpoint(
+            Path(tb_logger.log_dir) / "checkpoints",
+            monitor="val_map",
+            mode="max",
+            save_top_k=1,
+            # save_last=True,
+        )]
+
+    else:
+        loggers = []
+        checkpoint_callbacks = []
+
+    # Read configuration and get removed samples
+    with open(args.cfg, 'r') as f:
+        config = json.load(f)
+
+    errors = pd.read_csv(config["errors"])
+    error_moid   = errors.moid.values
+
+    data_root       = Path(args.source)
+    removed_samples = config["removed"] + error_moid.tolist()
+
+    # Initialize data module
+    dm = SuperbDataModule(
+        data_dir = data_root,
+        batch_size=args.batch_size,
+        image_size=(args.height, args.width),
+        train_split=args.train_fraction,
+        removed=removed_samples,
+        n_workers=args.n_workers,
+        n_classes=args.n_classes,
+        n_keypoints=args.n_keypoints,
+        bbox_expansion=args.bbox_expansion,
+        bbox_format=args.bbox_format,
+        target_format=["label", "bbox", "keypoint"],
+        filter=lambda p: all([v.coordinates is not None for v in p.vertebrae])
+    )
+
+    augmentation    = DetectionAugmentation(
+        p=args.p_augmentation, 
+        size_percent=(0.04, 0.04), 
+        p_dropout=args.p_dropout,
+        p_crop=args.p_crop,
+        )
+
+    # Set up loss and optimizer
+    if args.optimizer == 'adam':
+        optimizer   = torch.optim.Adam
+        optimizer_params = {
+            'lr': args.lr,
+            'weight_decay': args.weight_decay
+        }
+    elif args.optimizer == 'sgd':
+        optimizer   = torch.optim.SGD
+        optimizer_params = {
+            'lr': args.lr,
+            'momentum': args.momentum,
+            'weight_decay': args.weight_decay
+        }
+    else:
+        raise ValueError(f"Optimizer {args.optimizer} not supported")
+
+    # Initialize model
+    if args.backbone == "faster-rcnn":
+        backbone = torchvision.models.detection.keypointrcnn_resnet50_fpn(
+            num_classes=dm.n_classes+1,
+            num_keypoints=dm.n_keypoints,
+            weights_backbone=None,
+        )
+
+        model = SuperbDetector(
+            model=backbone,
+            optimizer=optimizer,
+            augmentation=augmentation,
+            training_params=training_params,
+            optimizer_params=optimizer_params,
+        )
+
+    elif args.backbone == "detr":
+        backbone = torchvision.models.detr_resnet50(
+            num_classes=dm.n_classes+1,
+            num_keypoints=dm.n_keypoints,
+            pretrained=True
+        )
+
+        # model = SuberbDetr(
+        #     backbone=backbone,
+        #     optimizer=optimizer,
+        #     optimizer_params=optimizer_params,
+        #     lr=args.lr,
+        #     n_classes=dm.n_classes,
+        #     n_keypoints=dm.n_keypoints,
+        #     target=args.target
+        # )
+
+    else:
+        raise ValueError(f"Backbone {args.backbone} not supported")
     
-        parser = argparse.ArgumentParser(description='Train a SUPERB model')
+    # Initialize trainer
+    if torch.cuda.is_available():
+        accelerator = "gpu"
+        devices = [int(gpu) for gpu in args.device.split(",")]
+    else:
+        accelerator = "cpu"
+        devices = None
 
-        CONFIG_PATH         = './configs/data.json'
-        BATCH_SIZE          = 2
-        N_WORKERS           = 8
-        TRAIN_FRACTION      = 0.9
-        LR                  = 1e-4
-        MOMENTUM            = 0.9
-        WEIGHT_DECAY        = 1e-2
-        SEED                = 42
-        DEVICE              = 'gpu'
-        N_DEVICES           = 1
-        N_EPOCHS            = 100
-        BACKBONE            = 'resnet34'
-        LOG_DIR             = './logs'
-        LABEL_TYPE          = 'binary'
-        NAME                = 'superb'
-        SEVERITY            = 0
+    if args.checkpoint:
+        trainer = Trainer(
+            accelerator=accelerator,
+            devices=devices,
+            max_epochs=args.n_epochs,
+            logger=loggers,
+            callbacks=checkpoint_callbacks,
+            resume_from_checkpoint=args.checkpoint,
+            log_every_n_steps=20,
+        )
 
-        parser.add_argument('--source', type=str, default='/data/balder/datasets/superb/patients')
-        parser.add_argument('--cfg', type=str, default=CONFIG_PATH)
-        parser.add_argument('--batch_size', type=int, default=BATCH_SIZE)
-        parser.add_argument('--n_workers', type=int, default=N_WORKERS)
-        parser.add_argument('--train_fraction', type=int, default=TRAIN_FRACTION)
-        parser.add_argument('--label_type', type=str, default=LABEL_TYPE)
-        parser.add_argument('--lr', type=float, default=LR)
-        parser.add_argument('--momentum', type=float, default=MOMENTUM)
-        parser.add_argument('--weight_decay', type=float, default=WEIGHT_DECAY)
-        parser.add_argument('--seed', type=int, default=SEED)
-        parser.add_argument('--device', type=str, default=DEVICE)
-        parser.add_argument('--n_devices', type=str, default=N_DEVICES)
-        parser.add_argument('--n_epochs', type=int, default=N_EPOCHS)
-        parser.add_argument('--backbone', type=str, default=BACKBONE)
-        parser.add_argument('--log_dir', type=str, default=LOG_DIR)
-        parser.add_argument('--name', type=str, default=NAME)
-        parser.add_argument('--severity', type=int, default=SEVERITY)
+    else:
 
-        args = parser.parse_args()
+        trainer = Trainer(
+            accelerator=accelerator,
+            devices=devices,
+            max_epochs=args.n_epochs,
+            logger=loggers,
+            callbacks=checkpoint_callbacks,
+            log_every_n_steps=20,
+        )
 
-        torch.manual_seed(args.seed)
-        np.random.seed(args.seed)
+    torch.set_float32_matmul_precision('medium')
 
-        # Human readable time
-        name = time.strftime("%Y%m%d-%H%M%S")
+    # Train model
+    trainer.fit(model, dm)
 
-        # Read config
-        with open(args.cfg, 'r') as f:
-                config = json.load(f)
-
-        DATA_ROOT               = Path(args.source)
-        REMOVED                 = config["removed"]
-        RESIZE_SHAPE            = (300, 100)#config["min_shape"]
-
-        dataset     = BinaryDataset(DATA_ROOT, RESIZE_SHAPE, REMOVED, severity=args.severity, mode='severity')
-        n_classes   = 1
-        # dataset     = CategoricalDataset(DATA_ROOT, RESIZE_SHAPE, REMOVED, severity=args.severity, mode='exists')
-        # n_classes   = len(labelling.VERTEBRA_NAMES)
-
-        # Undersample dataset
-        idxs = [i for i, (_, y) in enumerate(dataset) if y > args.severity]
-        jdxs = [i for i, (_, y) in enumerate(dataset) if y == 0]
-
-        print(f"Number of positive samples: {len(idxs)}")
-        print(f"Number of negative samples: {len(jdxs)}")
-
-        # Randomly sample from the majority class
-        jdxs = np.random.choice(jdxs, len(idxs), replace=False)
-
-        all_idxs = np.concatenate((idxs, jdxs))
-        subset = Subset(dataset, all_idxs)
-
-
-        ys   = np.array([y for _, y in subset])
-        sss = StratifiedShuffleSplit(
-                n_splits=1, 
-                test_size=1-args.train_fraction, 
-                random_state=args.seed
-                )
-        
-        train_idx, val_idx = next(sss.split(all_idxs, ys))
-
-        train_dataset       = Subset(subset, train_idx)
-        validation_dataset  = Subset(subset, val_idx)
-
-        print(f"Train set size: {len(train_dataset)}")
-        print(f"Validation set size: {len(validation_dataset)}")
-        
-
-        train_dataloader    = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.n_workers, shuffle=True, collate_fn=dataset.collate_fn)
-        val_dataloader      = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.n_workers, collate_fn=dataset.collate_fn)
-
-        # Define model
-        train_augmenter   = Augmenter(p=0.5, mode='train')
-        val_augmenter     = Augmenter(p=0, mode='val')
-
-        # model = CustomSuperbBackbone(in_channels=8, n_classes=n_classes, n_layers=3)
-        model = models.resnet152(pretrained=False, num_classes=n_classes)
-
-        # Define optimizer
-        # optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-        # Make training loop
-        criterion = nn.BCEWithLogitsLoss()
-        # criterion = nn.NLLLoss()
-
-        # Define device
-        if args.device == 'gpu':
-                device = torch.device('cuda:0')
-        else:
-                device = torch.device('cpu')
-
-        model.to(device)
-
-        # Define logging
-        log_dir = Path(args.log_dir)
-        log_dir.mkdir(exist_ok=True)
-
-        log_file = log_dir / f'{args.name}_{name}.txt'
-
-        with open(log_file, 'w') as f:
-                f.write(f"Train set size: {len(train_dataset)}\n")
-                f.write(f"Validation set size: {len(validation_dataset)}\n")
-                f.write(f"Number of positive samples: {len(idxs)}\n")
-                f.write(f"Number of negative samples: {len(jdxs)}\n")
-
-        # Train model in loop
-        for epoch in range(args.n_epochs):
-                        
-                        # Train
-                        train_loss = train(model, train_dataloader, optimizer, criterion, device, train_augmenter, epoch, log_file)
-        
-                        # Validate
-                        val_loss, val_acc = validate(model, val_dataloader, criterion, device, val_augmenter, epoch, log_file)
-        
-                        # Save model
-                        if epoch % 10 == 0:
-                                model_path = log_dir / f'{args.name}_{name}_{epoch}.pt'
-                                torch.save(model.state_dict(), model_path)
-        
-
-def train(model, train_dataloader, optimizer, criterion, device, augmenter, epoch, log_file):
-        model.train()
-        train_loss = 0
-        for batch_idx, (data, target) in enumerate(train_dataloader):
-
-                data = augmenter(data)
-                # print(data, data.min(), data.max())
-                # plt.hist(data.cpu().flatten())
-                # plt.savefig(f"hist_{batch_idx}.png")
-                # print(data.shape)
-
-                target = torch.tensor(target, dtype=torch.float32)
-
-                data, target = data.to(device), target.to(device)
-
-                optimizer.zero_grad()
-                output = model(data)
-                output = output.reshape_as(target)
-                target_binary = torch.minimum(target, torch.ones_like(target))
-                # print(output.shape, target_binary.shape)
-                # print(output, target_binary)
-                loss = criterion(output, target_binary)
-                loss.backward()
-                optimizer.step()
-                train_loss += loss.item()
-                if batch_idx % 10 == 0:
-                        print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_dataloader.dataset)} ({100. * batch_idx / len(train_dataloader):.0f}%)]\tLoss: {loss.item():.6f}')
-                        with open(log_file, 'a') as f:
-                                f.write(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_dataloader.dataset)} ({100. * batch_idx / len(train_dataloader):.0f}%)]\tLoss: {loss.item():.6f}\n')
-
-                if loss.item() < 0:
-                        print('Loss is negative')
-                        print(f"Data characteristics: {data.shape}, {data.dtype}, {data.min()}, {data.max()}")
-                        print(f"Target characteristics: {target.shape}, {target.dtype}, {target.min()}, {target.max()}")
-                        print(f"Output characteristics: {output.shape}, {output.dtype}, {output.min()}, {output.max()}")
-
-        train_loss /= len(train_dataloader.dataset)
-        print(f'====> Epoch: {epoch} Average loss: {train_loss:.4f}')
-        with open(log_file, 'a') as f:
-                f.write(f'====> Epoch: {epoch} Average loss: {train_loss:.4f}\n')
-        return train_loss
-
-def validate(model, val_dataloader, criterion, device, augmenter, epoch, log_file):
-        model.eval()
-        val_loss = 0
-        correct = 0
-        with torch.no_grad():
-                for batch_idx, (data, target) in enumerate(val_dataloader):	
-
-                        data = augmenter(data)
-
-                        # if batch_idx == 0:
-
-                        #         for i in range(data.shape[0]):
-                        #                 plt.imshow(data[i, 0, :, :].cpu().numpy())
-                        #                 plt.savefig(f"val_img_{i}.png")
-                        #                 plt.close()
-
-                        target = torch.tensor(target, dtype=torch.float32)
-
-                        data, target = data.to(device), target.to(device)
-
-                        output = model(data)
-                        output = output.reshape_as(target)
-                        
-                        target_binary = torch.minimum(target, torch.ones_like(target))
-                        
-                        
-                        val_loss += criterion(output, target_binary).item()
-                        pred = torch.sigmoid(output).round()
-                        #print(pred, target_binary)
-                        correct += pred.eq(target_binary.view_as(pred)).sum().item()
-        
-        val_loss /= len(val_dataloader.dataset)
-        val_acc = 100. * correct / len(val_dataloader.dataset)
-        print(f'====> Validation set loss: {val_loss:.4f}, accuracy: {val_acc:.0f}%')
-        with open(log_file, 'a') as f:
-                f.write(f'====> Validation set loss: {val_loss:.4f}, accuracy: {val_acc:.0f}%\n')
-        return val_loss, val_acc
-
-if __name__ == '__main__':
-        main()
+if __name__ == "__main__":
+    main()

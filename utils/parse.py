@@ -86,6 +86,21 @@ def middle_point_of_list_of_points(points: List[Tuple[float, float]]):
 
     return (top + bottom) / 2, (left + right) / 2
 
+def vertebrae_coordinates(spans: List[Tuple[int, int, int, int]]):
+
+    valid_span = lambda span: span[0] >= 0 and span[1] >= 0 and span[2] >= 0 and span[3] >= 0
+
+    spans = np.array([(span[2], span[3]) for span in spans if valid_span(span)])
+
+    if len(spans) % (4*6) != 0:
+        raise ValueError("Number of spans is not a multiple of 24")
+
+    idxs = np.argsort(np.arange(len(spans)))
+    splits = np.split(idxs, len(idxs) / 4)
+    coords = np.array([np.mean(spans[split], axis=0) for split in splits])
+
+    return coords
+
 def calculate_approximate_vertebrae_coordinates(spans: List[Tuple[int, int, int, int]], n_vertebrae: int):
 
     n_spans = len(spans)
@@ -134,7 +149,8 @@ def parse_annotation_pdf(path: Path) -> Tuple[np.ndarray, int, int, List[str]]:
 
     n_names = len(names)
 
-    coordinates = calculate_approximate_vertebrae_coordinates(offset_spans, n_names)
+    # coordinates = calculate_approximate_vertebrae_coordinates(offset_spans, n_names)
+    coordinates = vertebrae_coordinates(offset_spans)
     props = extract_props_from_element(f)
 
     return coordinates, props[0], props[1], names
